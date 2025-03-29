@@ -1,3 +1,5 @@
+import pytest
+
 def test_peer_discovery():
     # Test case for successful peer discovery
     discovered_peers = discover_peers()
