@@ -47,11 +47,29 @@ def request_file(host='localhost',port=12345,filename=''):
     sock.close()     
 
 def start_server(host='0.0.0.0',port=12345):
-    sock = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    sock.bind((host,port))
-    sock.listen(5)
-    print(f"Listening on {host}:{port}")
-    while True:
-        conn, addr = sock.accept()
-        print(f"Connected by {addr}")
-        threading.Thread(target=handle_request,args=(conn,)).start()
+    def run_server(server_socket):
+        while True:
+                try:
+                    conn, addr = server_socket.accept()
+                    print(f"Connected by {addr}")
+                    threading.Thread(target=handle_request, args=(conn,)).start()
+                except Exception as e:
+                    print(f"Server error: {e}")
+                    break
+    
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind((host, port))
+        sock.listen(5)
+        print(f"Listening on {host}:{port}")
+        
+        # Start server in background thread
+        server_thread = threading.Thread(target=run_server, args=(sock,))
+        server_thread.daemon = True  # Allow clean program exit
+        server_thread.start()
+        
+        return sock, server_thread  # Return for cleanup purposes
+        
+    except Exception as e:
+        print(f"Failed to start server: {e}")
+        raise
