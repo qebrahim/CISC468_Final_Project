@@ -3,6 +3,7 @@ import signal
 import sys
 from pathlib import Path
 import logging
+import time
 from discovery.mdns import PeerDiscovery
 from network.peer import Peer
 from network.protocol import start_server
@@ -17,6 +18,10 @@ class P2PApplication:
         self.running = True
         self.storage_path = Path.home() / '.p2p-share'
         self.storage_path.mkdir(parents=True, exist_ok=True)
+
+        # Track connected peers
+        self.connected_peers = set()
+        self.connection_event = threading.Event()
 
         # Generate peer ID and keys
         self.peer_id = self._generate_peer_id()
@@ -39,16 +44,47 @@ class P2PApplication:
             self.discovery.start_advertising()
             logger.info("Peer discovery service started")
 
-            start_server()
+            # Start server with connection callback
+            self.server_socket, self.server_thread = start_server(
+                connection_callback=self._on_peer_connected
+            )
             logger.info(f"Protocol handler listening on port {self.port}")
+
+            # Wait for initial connection before showing menu
+            logger.info("Waiting for peer connections...")
+            print("Waiting for connection from another peer...")
 
             # Main application loop
             while self.running:
+                # Wait for at least one connection before showing menu
+                if not self.connected_peers:
+                    self.connection_event.wait(5)  # Check every 5 seconds
+                    continue
+
                 self._handle_user_input()
 
         except Exception as e:
             logger.error(f"Error running P2P application: {e}")
             self.shutdown()
+
+    def _on_peer_connected(self, addr):
+        """Callback method when a new peer connects"""
+        peer_address = f"{addr[0]}:{addr[1]}"
+        logger.info(f"New peer connected: {peer_address}")
+        self.connected_peers.add(peer_address)
+        self.connection_event.set()  # Signal that we have a connection
+
+    def _on_peer_disconnected(self, addr):
+        """Callback method when a peer disconnects"""
+        peer_address = f"{addr[0]}:{addr[1]}"
+        if peer_address in self.connected_peers:
+            self.connected_peers.remove(peer_address)
+            logger.info(f"Peer disconnected: {peer_address}")
+
+            # If no more peers, reset the event
+            if not self.connected_peers:
+                self.connection_event.clear()
+                print("\nAll peers disconnected. Waiting for new connections...")
 
     def shutdown(self):
         logger.info("Shutting down P2P application...")
@@ -68,27 +104,49 @@ class P2PApplication:
             choice = input("\nEnter command number: ")
 
             if choice == "1":
-                peers = self.peer.list_connected_peers()
-                print("\nConnected peers:", peers)
+                print("\nConnected peers:")
+                for i, peer in enumerate(self.connected_peers):
+                    print(f"{i+1}. {peer}")
 
             elif choice == "2":
-                peer_id = input("Enter peer ID: ")
-                filename = input("Enter filename: ")
-                self.peer.send_file_request(peer_id, filename)
+                if not self.connected_peers:
+                    print("No peers connected")
+                    return
+
+                # Let user select a peer from the list
+                print("\nSelect a peer:")
+                for i, peer in enumerate(self.connected_peers):
+                    print(f"{i+1}. {peer}")
+
+                peer_idx = int(input("Enter peer number: ")) - 1
+                if 0 <= peer_idx < len(self.connected_peers):
+                    peer_addr = list(self.connected_peers)[peer_idx]
+                    filename = input("Enter filename: ")
+
+                    # Extract host and port from peer_addr
+                    host, port = peer_addr.split(':')
+                    from network.protocol import request_file
+                    request_file(host=host, port=int(port), filename=filename)
+                else:
+                    print("Invalid peer selection")
 
             elif choice == "3":
                 filename = input("Enter filename to share: ")
                 if Path(filename).exists():
-                    # Add file to shared files
+                    # Add file to shared files list (implementation needed)
                     print(f"File {filename} is now available for sharing")
                 else:
                     print("File not found")
 
             elif choice == "4":
                 # List available files from all connected peers
-                for peer_id in self.peer.list_connected_peers():
-                    print(f"\nFiles available from {peer_id}:")
-                    # Request file list from peer
+                if not self.connected_peers:
+                    print("No peers connected")
+                else:
+                    for peer in self.connected_peers:
+                        print(f"\nFiles available from {peer}:")
+                        # Request file list from peer (implementation needed)
+                        print("  (File listing not implemented yet)")
 
             elif choice == "5":
                 self.shutdown()
