@@ -80,3 +80,12 @@ func LoadPublicKey(publicKeyPath string) (*rsa.PublicKey, error) {
 
 	return pub.(*rsa.PublicKey), nil
 }
+
+func GenerateKey() ([]byte, error) {
+	key := make([]byte, 16) // Example length for AES-128
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}

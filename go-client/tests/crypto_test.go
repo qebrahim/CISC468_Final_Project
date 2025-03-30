@@ -1,8 +1,8 @@
 package tests
 
 import (
+	"p2p-file-sharing/go-client/internal/crypto"
 	"testing"
-	"p2p-file-sharing/internal/crypto"
 )
 
 func TestEncryptDecrypt(t *testing.T) {
@@ -25,7 +25,8 @@ func TestEncryptDecrypt(t *testing.T) {
 }
 
 func TestKeyGeneration(t *testing.T) {
-	key := crypto.GenerateKey()
+	key, error := crypto.GenerateKey() // Assuming GenerateKey is a function that generates a key
+	print(error)
 	if len(key) != 16 { // Example length for AES-128
 		t.Errorf("Generated key length is incorrect. Got: %d, Want: 16", len(key))
 	}
