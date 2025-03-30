@@ -1,48 +1,27 @@
-def encrypt_file(file_path, key):
-    from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import base64
 
-    # Read the file
-    with open(file_path, 'rb') as file:
-        file_data = file.read()
+class FileEncryption:
+    def __init__(self, session_key):
+        self.fernet = Fernet(self._derive_key(session_key))
 
-    # Encrypt the file data
-    fernet = Fernet(key)
-    encrypted_data = fernet.encrypt(file_data)
+    def _derive_key(self, session_key):
+        """Derive a Fernet-compatible key from session key"""
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b'file_transfer_salt',  # Should be unique per session
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(session_key))
+        return key
 
-    # Write the encrypted file
-    with open(file_path + '.encrypted', 'wb') as file:
-        file.write(encrypted_data)
+    def encrypt_file_data(self, file_data):
+        """Encrypt file data using session-derived key"""
+        return self.fernet.encrypt(file_data)
 
-def decrypt_file(encrypted_file_path, key):
-    from cryptography.fernet import Fernet
-
-    # Read the encrypted file
-    with open(encrypted_file_path, 'rb') as file:
-        encrypted_data = file.read()
-
-    # Decrypt the file data
-    fernet = Fernet(key)
-    decrypted_data = fernet.decrypt(encrypted_data)
-
-    # Write the decrypted file
-    original_file_path = encrypted_file_path.replace('.encrypted', '')
-    with open(original_file_path, 'wb') as file:
-        file.write(decrypted_data)
-
-def generate_key():
-    from cryptography.fernet import Fernet
-
-    # Generate a key
-    key = Fernet.generate_key()
-    return key
-
-def save_key(key, key_file):
-    # Save the key to a file
-    with open(key_file, 'wb') as file:
-        file.write(key)
-
-def load_key(key_file):
-    # Load the key from a file
-    with open(key_file, 'rb') as file:
-        key = file.read()
-    return key
+    def decrypt_file_data(self, encrypted_data):
+        """Decrypt file data using session-derived key"""
+        return self.fernet.decrypt(encrypted_data)

@@ -2,11 +2,13 @@ from pathlib import Path
 import socket
 import json
 from crypto.auth import PeerAuthentication
+from cryptography.hazmat.primitives import hmac, hashes
 import logging
 import hashlib
 from crypto.keys import generate_keypair, save_private_key, save_public_key, load_private_key, load_public_key
-
-
+from crypto.encryption import FileEncryption
+import struct
+from cryptography.exceptions import InvalidSignature
 logger = logging.getLogger(__name__)
 class Peer:
     def __init__(self, peer_id, address, keys_dir='keys'):
@@ -102,6 +104,14 @@ class Peer:
                 host, port = peer.address.split(':')
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((host, int(port)))
+
+                     # Get session key and create encryptor
+                    session = self.auth.session_manager.sessions[peer_id]
+                    file_encryptor = FileEncryption(session['shared_key'])
+                    
+                    # Read and encrypt file in chunks
+                    file_path = self.shared_directory / file_name
+                    sha256 = hashlib.sha256()
                     
                     # Send authenticated request
                     request = {
@@ -111,26 +121,47 @@ class Peer:
                         'signature': self.auth.sign_message(file_name)
                     }
                     s.sendall(json.dumps(request).encode())
-                    
-                    # Receive and save file
+                    # Wait for ready signal
+                    if s.recv(1024) != b'ready':
+                        raise Exception("Peer not ready")
+            
+                    # Send file in encrypted chunks with integrity protection
                     file_path = self.shared_directory / file_name
-                    file_hash = self.receive_file(s, file_path)
+                    sha256 = hashlib.sha256()
                     
-                    # Verify file integrity
-                    if file_hash == response['file_hash']:
-                        logger.info(f"File '{file_name}' received and verified")
-                        return True
-                    else:
-                        logger.error("File verification failed")
-                        file_path.unlink()  # Remove corrupted file
-                        return False
+                    with open(file_path, 'rb') as f:
+                        while chunk := f.read(8192):
+                            # Update file hash
+                            sha256.update(chunk)
+                            
+                            # Encrypt chunk
+                            encrypted_chunk = file_encryptor.encrypt_file_data(chunk)
+                            
+                            # Create chunk HMAC
+                            chunk_hmac = hmac.HMAC(session['shared_key'], hashes.SHA256())
+                            chunk_hmac.update(encrypted_chunk)
+                            
+                            # Send chunk size, chunk, and HMAC
+                            chunk_data = struct.pack('!Q', len(encrypted_chunk)) + encrypted_chunk + chunk_hmac.finalize()
+                            s.sendall(chunk_data)
+                            
+                            if s.recv(1024) != b'ok':
+                                raise Exception("Chunk transfer failed")
+                    
+                    # Send end marker and final hash
+                    s.sendall(b'\x00' * 8)
+                    s.sendall(sha256.digest())
+                    
+                    return True
             else:
-                logger.info("File request denied by peer")
+                logger.error(f"File request denied by peer: {peer_id}")
                 return False
-                
         except Exception as e:
-            logger.error(f"Error in file request: {e}")
+            logger.error(f"Error sending file request: {e}")
             return False
+        
+                   
+    
     def handle_file_request(self, requester_id, file_name):
         """Handle incoming file request with consent"""
         if requester_id not in self.connected_peers:
@@ -180,17 +211,67 @@ class Peer:
 
     def list_connected_peers(self):
         return list(self.connected_peers.keys())
-    def receive_file(self, sock, file_path):
-        """Receive file data and calculate hash"""
-        sha256 = hashlib.sha256()
-        with open(file_path, 'wb') as f:
-            while True:
-                data = sock.recv(8192)
-                if not data:
-                    break
-                sha256.update(data)
-                f.write(data)
-        return sha256.hexdigest()
+   
+    def receive_file(self, sock, file_path, peer_id):
+        """Receive and verify encrypted file"""
+        try:
+            # Get session for decryption
+            session = self.auth.session_manager.sessions[peer_id]
+            file_decryptor = FileEncryption(session['shared_key'])
+            
+            # Receive and verify metadata
+            meta_size = struct.unpack('!Q', sock.recv(8))[0]
+            meta_bytes = sock.recv(meta_size)
+            meta_hmac = sock.recv(32)
+            
+            # Verify metadata integrity
+            h = hmac.HMAC(session['shared_key'], hashes.SHA256())
+            h.update(meta_bytes)
+            try:
+                h.verify(meta_hmac)
+            except InvalidSignature:
+                raise Exception("Metadata integrity check failed")
+            
+            metadata = json.loads(meta_bytes.decode())
+            sock.sendall(b'ready')
+            
+            # Receive and decrypt file chunks
+            sha256 = hashlib.sha256()
+            with open(file_path, 'wb') as f:
+                while True:
+                    chunk_size = struct.unpack('!Q', sock.recv(8))[0]
+                    if chunk_size == 0:
+                        break
+                    
+                    encrypted_chunk = sock.recv(chunk_size)
+                    chunk_hmac = sock.recv(32)
+                    
+                    # Verify chunk integrity
+                    h = hmac.HMAC(session['shared_key'], hashes.SHA256())
+                    h.update(encrypted_chunk)
+                    try:
+                        h.verify(chunk_hmac)
+                    except InvalidSignature:
+                        raise Exception("Chunk integrity check failed")
+                    
+                    # Decrypt and write chunk
+                    chunk = file_decryptor.decrypt_file_data(encrypted_chunk)
+                    sha256.update(chunk)
+                    f.write(chunk)
+                    sock.sendall(b'ok')
+            
+            # Verify final hash
+            received_hash = sock.recv(32)
+            if received_hash != sha256.digest():
+                raise Exception("File integrity check failed")
+            
+            return sha256.hexdigest()
+            
+        except Exception as e:
+            logger.error(f"Error receiving file: {e}")
+            if file_path.exists():
+                file_path.unlink()
+            return None
 
     def calculate_file_hash(self, file_path):
         """Calculate SHA-256 hash of file"""
