@@ -98,7 +98,8 @@ class P2PApplication:
         print("2. Request file")
         print("3. Share file")
         print("4. List available files")
-        print("5. Exit")
+        print("5. Migrate keys")  # Add this option
+        print("6. Exit")
 
         try:
             choice = input("\nEnter command number: ")
@@ -149,6 +150,13 @@ class P2PApplication:
                         print("  (File listing not implemented yet)")
 
             elif choice == "5":
+                print("\nInitiating key migration...")
+                if self.peer.migrate_keys():
+                    print("Key migration successful")
+                else:
+                    print("Key migration failed")
+                
+            elif choice == "6":
                 self.shutdown()
 
         except Exception as e:
