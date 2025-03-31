@@ -118,9 +118,14 @@ def handle_file_request(conn, addr, filename):
         return
 
     # Ask for user consent
+    # Ask for user consent
     requester = f"{addr[0]}:{addr[1]}"
-    print(f"\nAllow {requester} to download {filename}? (y/n): ", end="")
-    consent = input().lower()
+    print(f"\nAllow {requester} to download {filename}? (y/n): ",
+          end="", flush=True)
+    consent = input().lower().strip()  # Add strip() to remove any whitespace
+
+    # Add this for debugging
+    logger.info(f"User consent for {filename}: '{consent}'")
 
     if consent != 'y':
         logger.info(
