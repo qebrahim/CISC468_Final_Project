@@ -159,7 +159,6 @@ class Peer:
                     'status': 'approved',
                     'file_hash': file_hash,
                     'file_size': path_to_use.stat().st_size,
-                    # Include file path for sending
                     'file_path': str(path_to_use)
                 }
             else:

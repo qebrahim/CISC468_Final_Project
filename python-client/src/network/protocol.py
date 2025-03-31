@@ -71,6 +71,25 @@ def handle_request(conn, addr):
             if command == "REQUEST_FILE":
                 filename = parts[1]
                 handle_file_request(conn, addr, filename)
+            elif command == "LIST_FILES":
+                # Get list of shared files
+                file_list = []
+
+                # Add files from shared_files list
+                for path in shared_files:
+                    file_list.append(os.path.basename(path))
+
+                # Check shared directory
+                shared_dir = Path.home() / '.p2p-share' / 'shared'
+                if shared_dir.exists():
+                    for file_path in shared_dir.glob('*'):
+                        if file_path.is_file() and file_path.name not in file_list:
+                            file_list.append(file_path.name)
+
+                # Send file list to client
+                response = "FILE_LIST:" + ",".join(file_list)
+                conn.sendall(response.encode('utf-8'))
+                logger.info(f"Sent file list with {len(file_list)} files")
             else:
                 logger.error(f"Unknown command: {command}")
                 conn.sendall(b"ERR:UNKNOWN_COMMAND")
@@ -117,7 +136,6 @@ def handle_file_request(conn, addr, filename):
         conn.sendall(b"ERR:FILE_NOT_FOUND")
         return
 
-    # Ask for user consent
     # Ask for user consent
     requester = f"{addr[0]}:{addr[1]}"
     print(f"\nAllow {requester} to download {filename}? (y/n): ",

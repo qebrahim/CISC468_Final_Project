@@ -21,7 +21,7 @@ class PeerDiscovery:
 
     def start_advertising(self):
         try:
-            ip_addr = self.get_local_ip()  # Use your existing method
+            ip_addr = self.get_local_ip()
             print(
                 f"🔵 Advertising service {self.service_name} at {ip_addr}:{self.port}")
 
