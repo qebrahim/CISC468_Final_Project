@@ -6,9 +6,9 @@ import logging
 import time
 from discovery.mdns import PeerDiscovery
 from network.peer import Peer
-from network.protocol import start_server
-from crypto.keys import generate_keypair, save_private_key, save_public_key
+from network.protocol import start_server, add_shared_file
 from network.protocol import request_file
+from crypto.keys import generate_keypair, save_private_key, save_public_key
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +19,10 @@ class P2PApplication:
         self.running = True
         self.storage_path = Path.home() / '.p2p-share'
         self.storage_path.mkdir(parents=True, exist_ok=True)
+
+        # Create shared directory
+        self.shared_directory = self.storage_path / 'shared'
+        self.shared_directory.mkdir(exist_ok=True)
 
         # Track connected peers
         self.connected_peers = set()
@@ -126,33 +130,61 @@ class P2PApplication:
 
                     # Extract host and port from peer_addr
                     host, port = peer_addr.split(':')
-                    request_file(host=host, port=int(port), filename=filename)
+
+                    # Request the file
+                    print(f"Requesting file '{filename}' from {peer_addr}...")
+                    success = request_file(
+                        host=host, port=int(port), filename=filename)
+
+                    if success:
+                        print(
+                            f"File '{filename}' successfully downloaded to {self.shared_directory}")
+                    else:
+                        print(f"Failed to download file '{filename}'")
                 else:
                     print("Invalid peer selection")
 
             elif choice == "3":
                 filename = input("Enter filename to share: ")
-                if Path(filename).exists():
-                    # Add file to shared files list (implementation needed)
-                    print(f"File {filename} is now available for sharing")
+                file_path = Path(filename)
+
+                if file_path.exists():
+                    # Add file to shared files list
+                    if add_shared_file(str(file_path)):
+                        print(f"File {filename} is now available for sharing")
+
+                        # Also copy to shared directory for easy access
+                        try:
+                            target_path = self.shared_directory / file_path.name
+                            with open(file_path, 'rb') as src, open(target_path, 'wb') as dst:
+                                dst.write(src.read())
+                            print(
+                                f"File copied to shared directory: {target_path}")
+                        except Exception as e:
+                            logger.error(
+                                f"Error copying file to shared directory: {e}")
+                    else:
+                        print(f"File {filename} is already being shared")
                 else:
                     print("File not found")
 
             elif choice == "4":
-                # List available files from all connected peers
-                if not self.connected_peers:
-                    print("No peers connected")
+                # List locally shared files
+                print("\nLocally shared files:")
+                local_files = list(self.shared_directory.glob('*'))
+                if local_files:
+                    for i, file_path in enumerate(local_files):
+                        file_size = file_path.stat().st_size
+                        print(f"{i+1}. {file_path.name} ({file_size} bytes)")
                 else:
-                    for peer in self.connected_peers:
-                        print(f"\nFiles available from {peer}:")
-                        # Request file list from peer (implementation needed)
-                        print("  (File listing not implemented yet)")
+                    print("No files are currently being shared")
 
             elif choice == "5":
                 self.shutdown()
 
         except Exception as e:
             logger.error(f"Error processing command: {e}")
+            print(f"Error: {e}")
 
     def _generate_peer_id(self):
         import uuid
