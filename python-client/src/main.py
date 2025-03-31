@@ -8,6 +8,7 @@ from discovery.mdns import PeerDiscovery
 from network.peer import Peer
 from network.protocol import start_server
 from crypto.keys import generate_keypair, save_private_key, save_public_key
+from network.protocol import request_file
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -125,7 +126,6 @@ class P2PApplication:
 
                     # Extract host and port from peer_addr
                     host, port = peer_addr.split(':')
-                    from network.protocol import request_file
                     request_file(host=host, port=int(port), filename=filename)
                 else:
                     print("Invalid peer selection")
