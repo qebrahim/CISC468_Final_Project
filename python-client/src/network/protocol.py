@@ -263,7 +263,7 @@ def handle_list_files_request(conn):
         if file_list:
             if hash_manager is not None:
                 try:
-                    # New format with hash information
+                    # New format with hash information, using semicolons between files
                     hash_info = hash_manager.get_file_hashes_as_string(
                         file_list)
                     response += hash_info

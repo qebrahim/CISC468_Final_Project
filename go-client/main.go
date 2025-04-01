@@ -388,34 +388,45 @@ func displayFileList(peerAddr, fileList string) {
 		return
 	}
 
-	// Check if the list is in the new format with hashes or old format
-	if strings.Contains(fileList, ";") {
-		// New format with hash information
-		fileEntries := strings.Split(fileList, ";")
+	// Check for the separator character to determine the format
+	var fileEntries []string
 
-		if len(fileEntries) == 0 || (len(fileEntries) == 1 && fileEntries[0] == "") {
-			fmt.Println("  No files available")
-			return
+	if strings.Contains(fileList, ";") {
+		// New format with multiple file entries separated by semicolons
+		fileEntries = strings.Split(fileList, ";")
+	} else if strings.Contains(fileList, ",") {
+		// Single file entry or old format
+		// Check if it contains exactly two commas, which would indicate a file,hash,size triplet
+		commaCount := strings.Count(fileList, ",")
+		if commaCount == 2 {
+			// This is likely a single file entry with hash and size
+			fileEntries = []string{fileList}
+		} else {
+			// Old format (comma-separated filenames only)
+			fileEntries = strings.Split(fileList, ",")
+		}
+	} else {
+		// Single file with no metadata
+		fileEntries = []string{fileList}
+	}
+
+	if len(fileEntries) == 0 || (len(fileEntries) == 1 && fileEntries[0] == "") {
+		fmt.Println("  No files available")
+		return
+	}
+
+	for i, entry := range fileEntries {
+		if entry == "" {
+			continue
 		}
 
-		for i, entry := range fileEntries {
-			if entry == "" {
-				continue
-			}
-
+		// Check if entry contains file metadata
+		if strings.Count(entry, ",") == 2 {
 			// Parse file,hash,size triplet
 			fileParts := strings.Split(entry, ",")
 			filename := fileParts[0]
-			hash := ""
-			size := ""
-
-			if len(fileParts) >= 2 {
-				hash = fileParts[1]
-			}
-
-			if len(fileParts) >= 3 {
-				size = fileParts[2]
-			}
+			hash := fileParts[1]
+			size := fileParts[2]
 
 			// Format output
 			sizeStr := ""
@@ -434,7 +445,7 @@ func displayFileList(peerAddr, fileList string) {
 			fmt.Printf("  %d. %s%s%s\n", i+1, filename, sizeStr, verifiedStr)
 
 			// Store hash information if hash manager is available
-			if hashManager != nil && hash != "" {
+			if hashManager != nil && hash != "" && filename != "" {
 				sizeInt, _ := strconv.ParseInt(size, 10, 64)
 
 				hashManager.Hashes[filename] = crypto.FileHashInfo{
@@ -444,26 +455,15 @@ func displayFileList(peerAddr, fileList string) {
 					LastVerified: float64(time.Now().Unix()),
 				}
 			}
+		} else {
+			// Single filename without metadata
+			fmt.Printf("  %d. %s\n", i+1, entry)
 		}
+	}
 
-		// Save updated hashes
-		if hashManager != nil {
-			hashManager.SaveHashes()
-		}
-	} else {
-		// Old format (comma-separated filenames only)
-		files := strings.Split(fileList, ",")
-
-		if len(files) == 0 || (len(files) == 1 && files[0] == "") {
-			fmt.Println("  No files available")
-			return
-		}
-
-		for i, file := range files {
-			if file != "" {
-				fmt.Printf("  %d. %s\n", i+1, file)
-			}
-		}
+	// Save updated hashes
+	if hashManager != nil {
+		hashManager.SaveHashes()
 	}
 }
 
