@@ -1,4 +1,3 @@
-import shutil
 import socket
 import threading
 import os
@@ -53,36 +52,20 @@ def notify_connection(addr, connected=True):
 def add_shared_file(filepath):
     """Add a file to the list of shared files"""
     abs_path = os.path.abspath(filepath)
-    if os.path.exists(abs_path):
-        if abs_path not in shared_files:
-            shared_files.append(abs_path)
+    if os.path.exists(abs_path) and abs_path not in shared_files:
+        shared_files.append(abs_path)
 
-            # Add file hash if hash manager is available
-            if hash_manager is not None:
-                try:
-                    basename = os.path.basename(abs_path)
-                    file_hash = hash_manager.add_file_hash(basename, abs_path)
-                    logger.info(
-                        f"Added file hash for {basename}: {file_hash[:8]}...")
-                except Exception as e:
-                    logger.warning(f"Failed to add file hash: {e}")
-
-            # Ensure file is copied to shared directory
+        # Add file hash if hash manager is available
+        if hash_manager is not None:
             try:
-                shared_dir = Path.home() / '.p2p-share' / 'shared'
-                shared_dir.mkdir(parents=True, exist_ok=True)
-                target_path = shared_dir / os.path.basename(abs_path)
-
-                # Copy file if it's not already in the shared directory
-                if not target_path.exists():
-                    shutil.copy2(abs_path, target_path)
-                    logger.info(
-                        f"Copied {os.path.basename(abs_path)} to shared directory")
+                basename = os.path.basename(abs_path)
+                file_hash = hash_manager.add_file_hash(basename, abs_path)
+                logger.info(
+                    f"Added file hash for {basename}: {file_hash[:8]}...")
             except Exception as e:
-                logger.error(f"Error copying file to shared directory: {e}")
+                logger.warning(f"Failed to add file hash: {e}")
 
-            return True
-        return False
+        return True
     return False
 
 
@@ -178,12 +161,12 @@ def handle_file_request(conn, addr, filename):
         file_hash = None
         if hash_manager is not None:
             try:
-                hash_info = hash_manager.get_file_hash(basename)
+                hash_info = hash_manager.get_file_hash(filename)
                 if hash_info:
                     file_hash = hash_info['hash']
                 else:
                     # Calculate and store the hash
-                    file_hash = hash_manager.add_file_hash(basename, file_path)
+                    file_hash = hash_manager.add_file_hash(filename, file_path)
             except Exception as e:
                 logger.warning(f"Error handling file hash: {e}")
                 # Continue without hash if there's an error
