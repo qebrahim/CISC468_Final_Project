@@ -72,17 +72,18 @@ class P2PApplication:
             logger.error(f"Error running P2P application: {e}")
             self.shutdown()
 
-    def _on_peer_connected(self, addr):
-        """Callback method when a new peer connects"""
-        peer_address = f"{addr[0]}:{addr[1]}"
-        logger.info(f"New peer connected: {peer_address}")
 
-        # Always use the standard port for communication, not the ephemeral port
-        # This fixes the issue where we try to connect back to the wrong port
-        standard_peer_address = f"{addr[0]}:12345"
+def _on_peer_connected(self, addr):
+    """Callback method when a new peer connects"""
+    peer_address = f"{addr[0]}:{addr[1]}"
+    logger.info(f"New peer connected: {peer_address}")
 
-        self.connected_peers.add(standard_peer_address)
-        self.connection_event.set()  # Signal that we have a connection
+    # Always use the standard port for communication, not the ephemeral port
+    # This fixes the issue where we try to connect back to the wrong port
+    standard_peer_address = f"{addr[0]}:12345"
+
+    self.connected_peers.add(standard_peer_address)
+    self.connection_event.set()  # Signal that we have a connection
 
     def _on_peer_disconnected(self, addr):
         """Callback method when a peer disconnects"""
@@ -137,8 +138,7 @@ class P2PApplication:
                     host, port = peer_addr.split(':')
 
                     # Request the file
-                    print(
-                        f"Requesting file '{filename}' from {peer_addr}...")
+                    print(f"Requesting file '{filename}' from {peer_addr}...")
                     success = request_file(
                         host=host, port=int(port), filename=filename)
 
@@ -157,8 +157,7 @@ class P2PApplication:
                 if file_path.exists():
                     # Add file to shared files list
                     if add_shared_file(str(file_path)):
-                        print(
-                            f"File {filename} is now available for sharing")
+                        print(f"File {filename} is now available for sharing")
 
                         # Also copy to shared directory for easy access
                         try:
