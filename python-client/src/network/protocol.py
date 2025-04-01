@@ -230,15 +230,33 @@ def handle_list_files_request(conn):
         # Get hash information for all files if hash manager is available
         if hash_manager is not None:
             try:
-                result = hash_manager.get_file_hashes_as_string(file_list)
-                response = f"FILE_LIST:{result}"
+                if file_list:
+                    result = hash_manager.get_file_hashes_as_string(file_list)
+                    response = f"FILE_LIST:{result}"
+                else:
+                    # Empty list but in new format
+                    response = "FILE_LIST:"
             except Exception as e:
                 logger.warning(f"Error getting file hashes: {e}")
                 # Fallback to old format without hashes
-                response = f"FILE_LIST:{','.join(file_list)}"
+                if file_list:
+                    response = f"FILE_LIST:{','.join(file_list)}"
+                else:
+                    # Empty list in old format
+                    response = "FILE_LIST:"
         else:
             # Old format without hashes
-            response = f"FILE_LIST:{','.join(file_list)}"
+            if file_list:
+                response = f"FILE_LIST:{','.join(file_list)}"
+            else:
+                # Empty list in old format
+                response = "FILE_LIST:"
+
+        # Log the response being sent (truncate if it's too long)
+        log_response = response
+        if len(log_response) > 100:
+            log_response = log_response[:97] + "..."
+        logger.info(f"Sending file list response: {log_response}")
 
         conn.sendall(response.encode('utf-8'))
         logger.info(f"Sent file list with {len(file_list)} files")
