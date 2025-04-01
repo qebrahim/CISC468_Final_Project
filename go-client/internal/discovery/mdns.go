@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/grandcat/zeroconf"
@@ -12,6 +13,9 @@ import (
 type MDNSDiscovery struct {
 	serviceName string
 	resolver    *zeroconf.Resolver
+	server      *zeroconf.Server
+	mutex       sync.Mutex
+	isRunning   bool
 }
 
 func NewMDNSDiscovery(serviceName string) *MDNSDiscovery {
@@ -23,6 +27,50 @@ func NewMDNSDiscovery(serviceName string) *MDNSDiscovery {
 	return &MDNSDiscovery{
 		serviceName: serviceName,
 		resolver:    resolver,
+	}
+}
+
+// StartAdvertising begins advertising this peer's service
+func (d *MDNSDiscovery) StartAdvertising(peerID string, port int) error {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+
+	if d.isRunning {
+		return nil // Already advertising
+	}
+
+	fmt.Println("📢 Starting mDNS advertisement...")
+
+	var err error
+	// Register service for discovery
+	d.server, err = zeroconf.Register(
+		fmt.Sprintf("go-peer-%s", peerID), // Instance name (must be unique)
+		d.serviceName,                     // Service type
+		"local.",                          // Domain
+		port,                              // Port
+		[]string{"txtv=1", fmt.Sprintf("id=%s", peerID)}, // TXT records
+		nil, // Interface to advertise on (nil = all)
+	)
+
+	if err != nil {
+		return fmt.Errorf("❌ Failed to register mDNS service: %v", err)
+	}
+
+	d.isRunning = true
+	fmt.Println("✅ mDNS advertisement started successfully")
+	return nil
+}
+
+// StopAdvertising stops the advertisement service
+func (d *MDNSDiscovery) StopAdvertising() {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+
+	if d.server != nil {
+		fmt.Println("🛑 Stopping mDNS advertisement...")
+		d.server.Shutdown()
+		d.server = nil
+		d.isRunning = false
 	}
 }
 

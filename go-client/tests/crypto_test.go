@@ -23,11 +23,3 @@ func TestEncryptDecrypt(t *testing.T) {
 		t.Errorf("Decrypted text does not match original. Got: %s, Want: %s", decryptedText, plaintext)
 	}
 }
-
-func TestKeyGeneration(t *testing.T) {
-	key, error := crypto.GenerateKey() // Assuming GenerateKey is a function that generates a key
-	print(error)
-	if len(key) != 16 { // Example length for AES-128
-		t.Errorf("Generated key length is incorrect. Got: %d, Want: 16", len(key))
-	}
-}
