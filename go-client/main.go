@@ -160,14 +160,16 @@ func handleIncomingConnection(conn net.Conn) {
 
 	// Read request type
 	requestType := make([]byte, 12)
-	_, err := conn.Read(requestType)
+	n, err := conn.Read(requestType)
 	if err != nil {
 		fmt.Printf("⚠️ Error reading request type: %v\n", err)
 		return
 	}
 
+	requestTypeStr := string(requestType[:n])
+
 	// Handle different request types
-	switch string(requestType) {
+	switch requestTypeStr {
 	case "FILE_REQUEST":
 		// Send acknowledgment
 		conn.Write([]byte("ACK"))
@@ -189,8 +191,34 @@ func handleIncomingConnection(conn net.Conn) {
 		if err != nil {
 			fmt.Printf("⚠️ Error handling file request: %v\n", err)
 		}
+
+	case "KEY_MIGRATION":
+		// Send acknowledgment
+		conn.Write([]byte("ACK"))
+
+		// Read encrypted notification
+		buffer := make([]byte, 4096)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			fmt.Printf("⚠️ Error reading key migration notification: %v\n", err)
+			return
+		}
+
+		// For simplicity, we'll assume the sender ID is known
+		// In a real implementation, this would come from the authentication process
+		senderID := "unknown" // This should be determined properly
+
+		// Process key migration notification
+		err = mainPeer.HandleKeyMigration(conn, buffer[:n], senderID)
+		if err != nil {
+			fmt.Printf("⚠️ Error handling key migration: %v\n", err)
+			conn.Write([]byte("ERROR"))
+		} else {
+			conn.Write([]byte("OK"))
+		}
+
 	default:
-		fmt.Printf("⚠️ Unknown request type: %s\n", string(requestType))
+		fmt.Printf("⚠️ Unknown request type: %s\n", requestTypeStr)
 	}
 }
 

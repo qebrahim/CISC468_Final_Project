@@ -278,3 +278,41 @@ func (pa *PeerAuthentication) ActivateNewKeys(newPrivateKey *rsa.PrivateKey, new
 
 	fmt.Println("🔄 Keys have been migrated successfully")
 }
+
+// GetVerifiedPeer returns the verified peer information
+func (pa *PeerAuthentication) GetVerifiedPeer(peerID string) *VerifiedPeer {
+	pa.mu.RLock()
+	defer pa.mu.RUnlock()
+
+	peer, exists := pa.VerifiedPeers[peerID]
+	if !exists {
+		return nil
+	}
+	return peer
+}
+
+// UpdatePeerKey updates a peer's public key and generates a new session key
+func (pa *PeerAuthentication) UpdatePeerKey(peerID string, newPublicKey *rsa.PublicKey) error {
+	pa.mu.Lock()
+	defer pa.mu.Unlock()
+
+	peer, exists := pa.VerifiedPeers[peerID]
+	if !exists {
+		return errors.New("peer not verified")
+	}
+
+	// Update public key
+	peer.PublicKey = newPublicKey
+
+	// Generate new session key
+	dhKey := make([]byte, 32)
+	if _, err := rand.Read(dhKey); err != nil {
+		return fmt.Errorf("failed to generate new session key: %w", err)
+	}
+
+	// In a real implementation, we would use ECDH for forward secrecy
+	sessionKey := sha256.Sum256(dhKey)
+	peer.SessionKey = sessionKey[:]
+
+	return nil
+}

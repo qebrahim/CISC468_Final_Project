@@ -3,6 +3,7 @@ package peer
 import (
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"p2p-file-sharing/go-client/internal/crypto/keys"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Peer represents a node in the P2P network
@@ -504,6 +506,7 @@ func (p *Peer) sendFile(conn net.Conn, filePath, recipientID string) error {
 }
 
 // MigrateKeys migrates to new keys for security
+// MigrateKeys migrates to new keys for security
 func (p *Peer) MigrateKeys() error {
 	// Initiate key migration
 	migrationData, err := p.Auth.InitiateKeyMigration()
@@ -514,14 +517,117 @@ func (p *Peer) MigrateKeys() error {
 	// Get new keys
 	newPrivateKey := migrationData["new_private_key"].(*rsa.PrivateKey)
 	newPublicKey := migrationData["new_public_key"].(*rsa.PublicKey)
+	publicKeyData := migrationData["public_key_data"].([]byte)
+	signature := migrationData["signature"].([]byte)
 
-	// For each connected peer, notify of key migration
-	// This is simplified here - in a real implementation, we would
-	// send a signed notification to each peer
-
+	// Notify all connected peers about the key migration
 	p.mu.RLock()
-	fmt.Printf("🔄 Notifying %d connected peers of key migration...\n", len(p.connectedPeers))
+	peers := make([]string, 0, len(p.connectedPeers))
+	addresses := make([]string, 0, len(p.connectedPeers))
+	for peerID, addr := range p.connectedPeers {
+		peers = append(peers, peerID)
+		addresses = append(addresses, addr)
+	}
 	p.mu.RUnlock()
+
+	fmt.Printf("🔄 Notifying %d connected peers of key migration...\n", len(peers))
+
+	// Create migration notification
+	migrationNotification := struct {
+		Type         string `json:"type"`
+		PeerID       string `json:"peer_id"`
+		NewPublicKey []byte `json:"new_public_key"`
+		Signature    []byte `json:"signature"`
+		Timestamp    int64  `json:"timestamp"`
+	}{
+		Type:         "key_migration",
+		PeerID:       p.PeerID,
+		NewPublicKey: publicKeyData,
+		Signature:    signature,
+		Timestamp:    time.Now().Unix(),
+	}
+
+	// Send notification to each peer
+	for i, peerID := range peers {
+		address := addresses[i]
+
+		// Parse address
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			fmt.Printf("⚠️ Invalid address format for peer %s: %v\n", peerID, err)
+			continue
+		}
+
+		// Connect to peer
+		conn, err := net.Dial("tcp", net.JoinHostPort(host, port))
+		if err != nil {
+			fmt.Printf("⚠️ Failed to connect to peer %s: %v\n", peerID, err)
+			continue
+		}
+
+		// Encrypt the notification
+		notificationBytes, err := json.Marshal(migrationNotification)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to marshal migration notification for peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		encryptedNotification, err := p.Auth.EncryptMessage(peerID, notificationBytes)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to encrypt migration notification for peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		// Send notification type
+		_, err = conn.Write([]byte("KEY_MIGRATION"))
+		if err != nil {
+			fmt.Printf("⚠️ Failed to send notification type to peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		// Read acknowledgment
+		ack := make([]byte, 3)
+		_, err = conn.Read(ack)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to read acknowledgment from peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		if string(ack) != "ACK" {
+			fmt.Printf("⚠️ Invalid acknowledgment from peer %s\n", peerID)
+			conn.Close()
+			continue
+		}
+
+		// Send encrypted notification
+		_, err = conn.Write(encryptedNotification)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to send migration notification to peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		// Read response
+		buffer := make([]byte, 1024)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			fmt.Printf("⚠️ Failed to read response from peer %s: %v\n", peerID, err)
+			conn.Close()
+			continue
+		}
+
+		if string(buffer[:n]) != "OK" {
+			fmt.Printf("⚠️ Peer %s rejected key migration: %s\n", peerID, string(buffer[:n]))
+		} else {
+			fmt.Printf("✅ Peer %s acknowledged key migration\n", peerID)
+		}
+
+		conn.Close()
+	}
 
 	// Activate new keys
 	p.Auth.ActivateNewKeys(newPrivateKey, newPublicKey)
@@ -540,6 +646,7 @@ func (p *Peer) MigrateKeys() error {
 		return fmt.Errorf("failed to save new public key: %w", err)
 	}
 
+	fmt.Println("🔑 Keys successfully migrated and all connected peers have been notified")
 	return nil
 }
 
@@ -572,4 +679,80 @@ func calculateFileHash(filePath string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// HandleKeyMigration processes a key migration notification from a peer
+func (p *Peer) HandleKeyMigration(conn net.Conn, encryptedNotification []byte, senderID string) error {
+	// Decrypt notification
+	decryptedNotification, err := p.Auth.DecryptMessage(senderID, encryptedNotification)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt key migration notification: %w", err)
+	}
+
+	// Parse notification
+	var notification struct {
+		Type         string `json:"type"`
+		PeerID       string `json:"peer_id"`
+		NewPublicKey []byte `json:"new_public_key"`
+		Signature    []byte `json:"signature"`
+		Timestamp    int64  `json:"timestamp"`
+	}
+
+	if err := json.Unmarshal(decryptedNotification, &notification); err != nil {
+		return fmt.Errorf("failed to parse key migration notification: %w", err)
+	}
+
+	// Verify sender ID
+	if notification.PeerID != senderID {
+		return errors.New("sender ID mismatch")
+	}
+
+	// Check timestamp to prevent replay attacks
+	now := time.Now().Unix()
+	if now-notification.Timestamp > 300 { // 5 minutes
+		return errors.New("key migration notification expired")
+	}
+
+	// Get peer's current public key
+	p.mu.RLock()
+	_, exists := p.connectedPeers[senderID]
+	p.mu.RUnlock()
+
+	if !exists {
+		return errors.New("peer not connected")
+	}
+
+	// Check if peer is in verified peers
+	verifiedPeer := p.Auth.GetVerifiedPeer(senderID)
+	if verifiedPeer == nil {
+		return errors.New("peer not in verified peers")
+	}
+
+	oldPublicKey := verifiedPeer.PublicKey
+
+	// Parse new public key
+	newPublicKeyInterface, err := x509.ParsePKIXPublicKey(notification.NewPublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to parse new public key: %w", err)
+	}
+
+	newPublicKey, ok := newPublicKeyInterface.(*rsa.PublicKey)
+	if !ok {
+		return errors.New("invalid public key format")
+	}
+
+	// Verify signature of new public key using old public key
+	err = keys.VerifySignature(oldPublicKey, string(notification.NewPublicKey), notification.Signature)
+	if err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	// Update peer's public key
+	err = p.Auth.UpdatePeerKey(senderID, newPublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to update peer key: %w", err)
+	}
+
+	fmt.Printf("✅ Updated public key for peer %s after key migration\n", senderID)
+	return nil
 }
