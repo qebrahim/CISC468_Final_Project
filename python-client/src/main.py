@@ -6,8 +6,7 @@ import logging
 import time
 from discovery.mdns import PeerDiscovery
 from network.peer import Peer
-from network.protocol import start_server, add_shared_file
-from network.protocol import request_file
+from network.protocol import start_server, add_shared_file, request_file, init_hash_manager
 from crypto.keys import generate_keypair, save_private_key, save_public_key
 
 logging.basicConfig(level=logging.INFO)
@@ -49,9 +48,10 @@ class P2PApplication:
             self.discovery.start_advertising()
             logger.info("Peer discovery service started")
 
-            # Start server with connection callback
+            # Start server with connection callback and peer_id for hash manager
             self.server_socket, self.server_thread = start_server(
-                connection_callback=self._on_peer_connected
+                connection_callback=self._on_peer_connected,
+                peer_id=self.peer_id  # Pass peer_id to initialize hash manager
             )
             logger.info(f"Protocol handler listening on port {self.port}")
 

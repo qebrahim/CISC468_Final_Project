@@ -2,8 +2,8 @@ import hashlib
 import json
 import os
 import time
-from pathlib import Path
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,9 @@ class HashManager:
         self.storage_path = Path.home() / '.p2p-share' / 'metadata'
         self.storage_path.mkdir(parents=True, exist_ok=True)
         self.hash_file = self.storage_path / 'file_hashes.json'
+        self.hashes = {}
         self.load_hashes()
+        logger.info(f"Hash manager initialized for peer {peer_id}")
 
     def load_hashes(self):
         """Load file hashes from storage"""
@@ -22,9 +24,12 @@ class HashManager:
             if self.hash_file.exists():
                 with open(self.hash_file, 'r') as f:
                     self.hashes = json.load(f)
+                logger.info(
+                    f"Loaded {len(self.hashes)} file hashes from storage")
             else:
                 self.hashes = {}
                 self.save_hashes()
+                logger.info("No existing hash file, created new empty one")
         except Exception as e:
             logger.error(f"Error loading file hashes: {e}")
             self.hashes = {}
@@ -34,6 +39,7 @@ class HashManager:
         try:
             with open(self.hash_file, 'w') as f:
                 json.dump(self.hashes, f, indent=2)
+            logger.debug(f"Saved {len(self.hashes)} file hashes to storage")
         except Exception as e:
             logger.error(f"Error saving file hashes: {e}")
 
@@ -53,6 +59,9 @@ class HashManager:
         """Add or update a file hash entry"""
         try:
             file_hash = self.calculate_file_hash(file_path)
+            if not file_hash:
+                return None
+
             file_size = os.path.getsize(file_path)
 
             if not origin_peer:
@@ -66,6 +75,7 @@ class HashManager:
                 "last_verified": time.time()
             }
             self.save_hashes()
+            logger.info(f"Added hash for file {basename}: {file_hash[:8]}...")
             return file_hash
         except Exception as e:
             logger.error(f"Error adding file hash: {e}")
@@ -74,7 +84,12 @@ class HashManager:
     def get_file_hash(self, filename):
         """Get hash information for a file"""
         basename = os.path.basename(filename)
-        return self.hashes.get(basename, None)
+        result = self.hashes.get(basename, None)
+        if result:
+            logger.debug(f"Found hash for {basename}: {result['hash'][:8]}...")
+        else:
+            logger.debug(f"No hash found for {basename}")
+        return result
 
     def verify_file_hash(self, file_path, expected_hash=None):
         """Verify file integrity against expected hash or stored hash"""
@@ -94,6 +109,7 @@ class HashManager:
 
             # Update last verification time if hash matches
             if actual_hash == expected_hash:
+                logger.info(f"Hash verification successful for {basename}")
                 if basename in self.hashes:
                     self.hashes[basename]["last_verified"] = time.time()
                     self.save_hashes()

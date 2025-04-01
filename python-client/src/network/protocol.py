@@ -6,24 +6,25 @@ import logging
 import os.path
 from pathlib import Path
 
-# Import the HashManager at the top of protocol.py
-from crypto.hash_manager import HashManager
-import json
-
-# Initialize the HashManager (add to globals near the top of file)
-hash_manager = None
-
 logger = logging.getLogger(__name__)
 
 # Keep track of all active connections and shared files
 active_connections = set()
 connection_callbacks = []
 shared_files = []
+hash_manager = None
 
 
 def init_hash_manager(peer_id):
+    """Initialize the hash manager with the given peer ID"""
     global hash_manager
-    hash_manager = HashManager(peer_id)
+    try:
+        from crypto.hash_manager import HashManager
+        hash_manager = HashManager(peer_id)
+        logger.info(f"Hash manager initialized for peer {peer_id}")
+    except Exception as e:
+        logger.warning(f"Failed to initialize hash manager: {e}")
+        logger.warning("File verification will be disabled")
 
 
 def register_connection_callback(callback):
@@ -52,6 +53,17 @@ def add_shared_file(filepath):
     abs_path = os.path.abspath(filepath)
     if os.path.exists(abs_path) and abs_path not in shared_files:
         shared_files.append(abs_path)
+
+        # Add file hash if hash manager is available
+        if hash_manager is not None:
+            try:
+                basename = os.path.basename(abs_path)
+                file_hash = hash_manager.add_file_hash(basename, abs_path)
+                logger.info(
+                    f"Added file hash for {basename}: {file_hash[:8]}...")
+            except Exception as e:
+                logger.warning(f"Failed to add file hash: {e}")
+
         return True
     return False
 
@@ -84,24 +96,7 @@ def handle_request(conn, addr):
                 filename = parts[1]
                 handle_file_request(conn, addr, filename)
             elif command == "LIST_FILES":
-                # Get list of shared files
-                file_list = []
-
-                # Add files from shared_files list
-                for path in shared_files:
-                    file_list.append(os.path.basename(path))
-
-                # Check shared directory
-                shared_dir = Path.home() / '.p2p-share' / 'shared'
-                if shared_dir.exists():
-                    for file_path in shared_dir.glob('*'):
-                        if file_path.is_file() and file_path.name not in file_list:
-                            file_list.append(file_path.name)
-
-                # Send file list to client
-                response = "FILE_LIST:" + ",".join(file_list)
-                conn.sendall(response.encode('utf-8'))
-                logger.info(f"Sent file list with {len(file_list)} files")
+                handle_list_files_request(conn)
             else:
                 logger.error(f"Unknown command: {command}")
                 conn.sendall(b"ERR:UNKNOWN_COMMAND")
@@ -116,7 +111,6 @@ def handle_request(conn, addr):
         conn.close()
 
 
-# Modify the handle_file_request function to include hash information
 def handle_file_request(conn, addr, filename):
     """Handle a file request from a client"""
     # First check if the requested file matches any shared file by basename
@@ -162,21 +156,30 @@ def handle_file_request(conn, addr, filename):
         return
 
     try:
-        # Get or compute the file hash
-        hash_info = hash_manager.get_file_hash(filename)
-
-        if not hash_info:
-            # If we don't have hash info yet, calculate and store it
-            file_hash = hash_manager.add_file_hash(filename, file_path)
-        else:
-            file_hash = hash_info['hash']
+        # Get or compute the file hash, if hash manager is available
+        file_hash = None
+        if hash_manager is not None:
+            try:
+                hash_info = hash_manager.get_file_hash(filename)
+                if hash_info:
+                    file_hash = hash_info['hash']
+                else:
+                    # Calculate and store the hash
+                    file_hash = hash_manager.add_file_hash(filename, file_path)
+            except Exception as e:
+                logger.warning(f"Error handling file hash: {e}")
+                # Continue without hash if there's an error
 
         # Open and read the file
         with open(file_path, 'rb') as file:
             file_size = os.path.getsize(file_path)
 
-            # Send file header with hash information
-            header = f"FILE_DATA:{os.path.basename(file_path)}:{file_size}:{file_hash}:"
+            # Send file header with hash information if available
+            if file_hash:
+                header = f"FILE_DATA:{os.path.basename(file_path)}:{file_size}:{file_hash}:"
+            else:
+                header = f"FILE_DATA:{os.path.basename(file_path)}:{file_size}:"
+
             conn.sendall(header.encode('utf-8'))
 
             # Send file data in chunks
@@ -206,7 +209,43 @@ def handle_file_request(conn, addr, filename):
         except:
             pass
 
-# Update the request_file function to handle hash verification
+
+def handle_list_files_request(conn):
+    """Handle request for list of shared files, including hash information"""
+    try:
+        # Get list of all files available for sharing
+        file_list = []
+
+        # Add files from shared_files list
+        for path in shared_files:
+            file_list.append(os.path.basename(path))
+
+        # Check shared directory
+        shared_dir = Path.home() / '.p2p-share' / 'shared'
+        if shared_dir.exists():
+            for file_path in shared_dir.glob('*'):
+                if file_path.is_file() and file_path.name not in file_list:
+                    file_list.append(file_path.name)
+
+        # Get hash information for all files if hash manager is available
+        if hash_manager is not None:
+            try:
+                result = hash_manager.get_file_hashes_as_string(file_list)
+                response = f"FILE_LIST:{result}"
+            except Exception as e:
+                logger.warning(f"Error getting file hashes: {e}")
+                # Fallback to old format without hashes
+                response = f"FILE_LIST:{','.join(file_list)}"
+        else:
+            # Old format without hashes
+            response = f"FILE_LIST:{','.join(file_list)}"
+
+        conn.sendall(response.encode('utf-8'))
+        logger.info(f"Sent file list with {len(file_list)} files")
+
+    except Exception as e:
+        logger.error(f"Error handling file list request: {e}")
+        conn.sendall(b"ERR:INTERNAL_ERROR")
 
 
 def request_file(host='localhost', port=12345, filename=''):
@@ -241,9 +280,9 @@ def request_file(host='localhost', port=12345, filename=''):
             logger.error(f"Unexpected response: {response}")
             return False
 
-        # Extract filename, filesize, and filehash
-        header_parts = response.split(':', 4)  # Split up to 4 parts
-        if len(header_parts) < 4:
+        # Extract filename, filesize, and filehash (if provided)
+        header_parts = response.split(':', 4)
+        if len(header_parts) < 3:
             logger.error(f"Invalid file header: {response}")
             return False
 
@@ -255,7 +294,10 @@ def request_file(host='localhost', port=12345, filename=''):
             return False
 
         # Extract hash if available
-        file_hash = header_parts[3] if len(header_parts) >= 4 else None
+        file_hash = None
+        if len(header_parts) >= 4 and header_parts[3]:
+            file_hash = header_parts[3]
+            logger.info(f"Received file hash: {file_hash[:8]}...")
 
         logger.info(f"Receiving file: {transfer_filename} ({filesize} bytes)")
 
@@ -267,13 +309,15 @@ def request_file(host='localhost', port=12345, filename=''):
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / file_save_as
 
+        # Calculate header size based on number of fields
+        # 3 colons minimum
+        header_size = len(
+            header_parts[0]) + len(header_parts[1]) + len(header_parts[2]) + 3
+        if file_hash:
+            header_size += len(file_hash) + 1  # +1 for additional colon
+
         with open(save_path, 'wb') as f:
             # Write any data already received after the header
-            # Adjust header size calculation to include the hash
-            header_size = len(header_parts[0]) + len(header_parts[1]) + \
-                len(header_parts[2]) + \
-                len(header_parts[3]) + 4  # 4 for the colons
-
             if len(initial_response) > header_size:
                 f.write(initial_response[header_size:])
                 bytes_received = len(initial_response) - header_size
@@ -294,45 +338,23 @@ def request_file(host='localhost', port=12345, filename=''):
                 if bytes_received % 40960 == 0:  # Log every ~40KB
                     logger.info(f"Receiving: {percent_complete:.1f}%")
 
-        # Verify file integrity if we have a hash
-        verified = False
-        if file_hash:
-            # Get existing hash info or create new entry
-            existing_hash_info = hash_manager.get_file_hash(transfer_filename)
+        # Verify file hash if available and we have a hash manager
+        if hash_manager is not None and file_hash:
+            try:
+                if hash_manager.verify_file_hash(save_path, file_hash):
+                    logger.info("File hash verified successfully")
 
-            if existing_hash_info:
-                # If we already have this file in our database
-                if existing_hash_info['hash'] != file_hash:
-                    logger.warning(f"Received file has different hash than expected! "
-                                   f"Expected: {existing_hash_info['hash']}, Got: {file_hash}")
-                    # Verify the actual file
-                    if not hash_manager.verify_file_hash(save_path, existing_hash_info['hash']):
-                        logger.error(
-                            f"File verification failed! The file may be corrupted or tampered with.")
-                        # Optionally rename or quarantine the file
-                        quarantine_path = save_dir / \
-                            f"quarantine_{file_save_as}"
-                        os.rename(save_path, quarantine_path)
-                        logger.info(
-                            f"Moved suspicious file to {quarantine_path}")
-                        return False
+                    # Store the hash information for future verification
+                    hash_manager.add_file_hash(
+                        transfer_filename, save_path, f"{host}:{port}")
                 else:
-                    # Hash matches what we expected
-                    verified = hash_manager.verify_file_hash(
-                        save_path, file_hash)
-            else:
-                # First time receiving this file, add to our hash database
-                calculated_hash = hash_manager.add_file_hash(
-                    transfer_filename, save_path, f"{host}:{port}")
-                verified = (calculated_hash == file_hash)
-
-        if verified:
-            logger.info(f"File hash verified successfully!")
-        elif file_hash:
-            logger.warning(f"File hash verification failed!")
-            return False
-        else:
-            logger.warning(f"No hash provided for verification")
+                    logger.warning(
+                        "File hash verification failed - file may be corrupted")
+                    print(
+                        "⚠️ Warning: File hash verification failed. The file may be corrupted.")
+                    # Option to remove corrupt file could be added here
+            except Exception as e:
+                logger.error(f"Error during hash verification: {e}")
 
         logger.info(f"Downloaded: {save_path}")
         return True
@@ -343,42 +365,13 @@ def request_file(host='localhost', port=12345, filename=''):
     finally:
         sock.close()
 
-# Update LIST_FILES handler to include file hash information
 
+def start_server(host='0.0.0.0', port=12345, connection_callback=None, peer_id=None):
+    """Start the server with an optional connection callback and peer ID for hash manager"""
 
-def handle_list_files_request(conn):
-    """Handle request for list of shared files, including hash information"""
-    try:
-        # Get list of all files available for sharing
-        file_list = []
-
-        # Add files from shared_files list
-        for path in shared_files:
-            file_list.append(os.path.basename(path))
-
-        # Check shared directory
-        shared_dir = Path.home() / '.p2p-share' / 'shared'
-        if shared_dir.exists():
-            for file_path in shared_dir.glob('*'):
-                if file_path.is_file() and file_path.name not in file_list:
-                    file_list.append(file_path.name)
-
-        # Get hash information for all files
-        result = hash_manager.get_file_hashes_as_string(file_list)
-
-        # Send file list with hash information
-        response = f"FILE_LIST:{result}"
-        conn.sendall(response.encode('utf-8'))
-        logger.info(
-            f"Sent file list with {len(file_list)} files and hash information")
-
-    except Exception as e:
-        logger.error(f"Error handling file list request: {e}")
-        conn.sendall(b"ERR:INTERNAL_ERROR")
-
-
-def start_server(host='0.0.0.0', port=12345, connection_callback=None):
-    """Start the server with an optional connection callback"""
+    # Initialize hash manager if peer_id is provided
+    if peer_id:
+        init_hash_manager(peer_id)
 
     # Register the callback if provided
     if connection_callback:
