@@ -243,7 +243,9 @@ def handle_list_files_request(conn):
 
         # Add files from shared_files list
         for path in shared_files:
-            file_list.append(os.path.basename(path))
+            basename = os.path.basename(path)
+            if basename not in file_list:
+                file_list.append(basename)
 
         # Check shared directory
         shared_dir = Path.home() / '.p2p-share' / 'shared'
@@ -282,6 +284,10 @@ def handle_list_files_request(conn):
 
         # Send the response
         conn.sendall(response.encode('utf-8'))
+
+        # Small delay to ensure the data is sent completely
+        time.sleep(0.1)
+
         logger.info(f"Sent file list with {len(file_list)} files")
 
     except Exception as e:

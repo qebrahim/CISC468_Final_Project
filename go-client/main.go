@@ -270,16 +270,21 @@ func listAvailableFiles() {
 			// Read response with timeout
 			newConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-			// Use a buffered reader for potentially large responses
-			reader := bufio.NewReader(newConn)
-			response, err := reader.ReadString('\n')
-			if err != nil && err != io.EOF {
+			// Use a simple buffer read instead of waiting for a newline
+			buffer := make([]byte, 4096) // Large enough for most file lists
+			n, err := newConn.Read(buffer)
+
+			if err != nil {
 				fmt.Printf("Error reading file list from %s: %v\n", addr, err)
 				return
 			}
 
 			// Reset deadline
 			newConn.SetReadDeadline(time.Time{})
+
+			// Get the response string
+			response := string(buffer[:n])
+			fmt.Printf("Raw response from %s: %s\n", addr, response)
 
 			// Check if it's a valid file list response
 			if strings.HasPrefix(response, "FILE_LIST:") {
@@ -290,7 +295,7 @@ func listAvailableFiles() {
 				}
 
 				// Debug output
-				fmt.Printf("Received file list from %s: %s\n", addr, fileListContent)
+				fmt.Printf("Parsed file list from %s: %s\n", addr, fileListContent)
 
 				// Send to our channel
 				responses <- struct {
@@ -322,6 +327,56 @@ func listAvailableFiles() {
 	if receivedLists == 0 {
 		fmt.Println("Did not receive any file lists from peers")
 	}
+
+	// Also display local shared files
+	localFiles := listLocalSharedFiles()
+	if len(localFiles) > 0 {
+		fmt.Println("\nLocally shared files:")
+		for i, file := range localFiles {
+			fmt.Printf("%d. %s\n", i+1, file)
+		}
+	}
+}
+
+// Helper function to list local shared files
+func listLocalSharedFiles() []string {
+	var files []string
+
+	// Add explicitly shared files
+	for _, path := range sharedFiles {
+		basename := filepath.Base(path)
+		if !contains(files, basename) {
+			files = append(files, basename)
+		}
+	}
+
+	// Check shared directory
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		sharedDir := filepath.Join(homeDir, ".p2p-share", "shared")
+		entries, err := os.ReadDir(sharedDir)
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					if !contains(files, entry.Name()) {
+						files = append(files, entry.Name())
+					}
+				}
+			}
+		}
+	}
+
+	return files
+}
+
+// Helper function to check if a slice contains a string
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function to display file list
