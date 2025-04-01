@@ -227,37 +227,35 @@ def handle_list_files_request(conn):
                 if file_path.is_file() and file_path.name not in file_list:
                     file_list.append(file_path.name)
 
-        # Get hash information for all files if hash manager is available
-        if hash_manager is not None:
-            try:
-                if file_list:
-                    result = hash_manager.get_file_hashes_as_string(file_list)
-                    response = f"FILE_LIST:{result}"
-                else:
-                    # Empty list but in new format
-                    response = "FILE_LIST:"
-            except Exception as e:
-                logger.warning(f"Error getting file hashes: {e}")
-                # Fallback to old format without hashes
-                if file_list:
-                    response = f"FILE_LIST:{','.join(file_list)}"
-                else:
-                    # Empty list in old format
-                    response = "FILE_LIST:"
-        else:
-            # Old format without hashes
-            if file_list:
-                response = f"FILE_LIST:{','.join(file_list)}"
+        logger.info(f"Found {len(file_list)} files to share")
+
+        # Construct the response
+        response = "FILE_LIST:"
+
+        # Add file content only if there are files
+        if file_list:
+            if hash_manager is not None:
+                try:
+                    # New format with hash information
+                    hash_info = hash_manager.get_file_hashes_as_string(
+                        file_list)
+                    response += hash_info
+                    logger.debug(f"Using new format with hash information")
+                except Exception as e:
+                    # Fallback to old format if hash manager fails
+                    logger.warning(f"Error getting file hashes: {e}")
+                    response += ','.join(file_list)
+                    logger.debug(f"Falling back to old format without hashes")
             else:
-                # Empty list in old format
-                response = "FILE_LIST:"
+                # Old format without hashes
+                response += ','.join(file_list)
+                logger.debug(f"Using old format (no hash manager)")
 
-        # Log the response being sent (truncate if it's too long)
-        log_response = response
-        if len(log_response) > 100:
-            log_response = log_response[:97] + "..."
-        logger.info(f"Sending file list response: {log_response}")
+        # Use repr to show all characters including whitespace
+        logger.info(
+            f"Sending file list response (length: {len(response)}): {repr(response)}")
 
+        # Send the response
         conn.sendall(response.encode('utf-8'))
         logger.info(f"Sent file list with {len(file_list)} files")
 
