@@ -2,26 +2,45 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"p2p-file-sharing/go-client/internal/crypto"
 	"p2p-file-sharing/go-client/internal/discovery"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Global variables to store state
 var connectedPeers map[string]net.Conn
 var sharedFiles []string
+var hashManager *crypto.HashManager
 
 func main() {
 	// Initialize
 	connectedPeers = make(map[string]net.Conn)
 	serviceName := "_p2p-share._tcp."
 	mdns := discovery.NewMDNSDiscovery(serviceName)
+
+	// Generate a peer ID (first 8 chars of a UUID)
+	peerID := generatePeerID()
+	fmt.Printf("🔌 Running as peer ID: %s\n", peerID)
+
+	// Initialize hash manager
+	var err error
+	hashManager, err = crypto.NewHashManager(peerID)
+	if err != nil {
+		fmt.Printf("⚠️ Warning: Failed to initialize hash manager: %v\n", err)
+		// Continue without hash verification if failed
+	} else {
+		fmt.Println("✅ Hash manager initialized for file verification")
+	}
 
 	// Set up signal handling for graceful shutdown
 	setupSignalHandling()
@@ -49,6 +68,17 @@ func main() {
 
 	// Start the command-line interface
 	runCommandLineInterface()
+}
+
+func generatePeerID() string {
+	// Generate 4 random bytes
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to a timestamp if random generation fails
+		return fmt.Sprintf("peer-%d", time.Now().UnixNano())
+	}
+	// Convert to hex string and return first 8 characters
+	return hex.EncodeToString(b)
 }
 
 func runCommandLineInterface() {
@@ -165,6 +195,17 @@ func shareFile(scanner *bufio.Scanner) {
 	}
 
 	sharedFiles = append(sharedFiles, absPath)
+
+	// Calculate and store file hash if hash manager is available
+	if hashManager != nil {
+		fileHash, err := hashManager.AddFileHash(filepath.Base(filename), absPath, "")
+		if err != nil {
+			fmt.Printf("Warning: Failed to calculate file hash: %v\n", err)
+		} else {
+			fmt.Printf("File hash calculated: %s\n", fileHash)
+		}
+	}
+
 	fmt.Printf("File %s is now available for sharing\n", filename)
 }
 
@@ -212,7 +253,7 @@ func receiveFileList(conn net.Conn, peerAddr string) {
 		return
 	}
 
-	// Process file list response (expected format: "FILE_LIST:file1,file2,file3")
+	// Process file list response (expected format: "FILE_LIST:file1,hash1,size1;file2,hash2,size2;...")
 	if !strings.HasPrefix(response, "FILE_LIST:") {
 		fmt.Printf("Unexpected response from %s: %s\n", peerAddr, response)
 		return
@@ -226,16 +267,103 @@ func receiveFileList(conn net.Conn, peerAddr string) {
 	}
 
 	fileList := parts[1]
-	files := strings.Split(fileList, ",")
+
+	// Check if the response is in the new format with hashes or old format
+	var files []string
+	var filesWithHash []struct {
+		Filename string
+		Hash     string
+		Size     string
+	}
+
+	// Check if we have semicolons (new format) or commas (old format)
+	if strings.Contains(fileList, ";") {
+		// New format with hash information
+		fileEntries := strings.Split(fileList, ";")
+
+		for _, entry := range fileEntries {
+			if entry == "" {
+				continue
+			}
+
+			// Parse file,hash,size triplet
+			fileParts := strings.Split(entry, ",")
+			fileInfo := struct {
+				Filename string
+				Hash     string
+				Size     string
+			}{
+				Filename: fileParts[0],
+				Hash:     "",
+				Size:     "",
+			}
+
+			if len(fileParts) >= 2 {
+				fileInfo.Hash = fileParts[1]
+			}
+
+			if len(fileParts) >= 3 {
+				fileInfo.Size = fileParts[2]
+			}
+
+			filesWithHash = append(filesWithHash, fileInfo)
+		}
+
+		// Store hash information if hash manager is available
+		if hashManager != nil {
+			for _, fileInfo := range filesWithHash {
+				if fileInfo.Filename != "" && fileInfo.Hash != "" {
+					sizeInt, _ := strconv.ParseInt(fileInfo.Size, 10, 64)
+
+					// Store hash information in our hash manager
+					hashManager.Hashes[fileInfo.Filename] = crypto.FileHashInfo{
+						Hash:         fileInfo.Hash,
+						Size:         sizeInt,
+						OriginPeer:   peerAddr,
+						LastVerified: float64(time.Now().Unix()),
+					}
+				}
+			}
+			// Save updated hashes
+			hashManager.SaveHashes()
+		}
+	} else {
+		// Old format (comma-separated filenames only)
+		files = strings.Split(fileList, ",")
+	}
 
 	// Display the file list
 	fmt.Printf("\nFiles available from %s:\n", peerAddr)
-	if len(files) == 0 || (len(files) == 1 && files[0] == "") {
-		fmt.Println("  No files available")
+
+	if len(filesWithHash) > 0 {
+		// Display new format with hash information
+		if len(filesWithHash) == 0 || (len(filesWithHash) == 1 && filesWithHash[0].Filename == "") {
+			fmt.Println("  No files available")
+		} else {
+			for i, fileInfo := range filesWithHash {
+				sizeStr := ""
+				if fileInfo.Size != "" {
+					sizeInt, _ := strconv.ParseInt(fileInfo.Size, 10, 64)
+					sizeStr = fmt.Sprintf(" (%d bytes)", sizeInt)
+				}
+
+				verifiedStr := ""
+				if fileInfo.Hash != "" {
+					verifiedStr = " [verifiable]"
+				}
+
+				fmt.Printf("  %d. %s%s%s\n", i+1, fileInfo.Filename, sizeStr, verifiedStr)
+			}
+		}
 	} else {
-		for i, file := range files {
-			if file != "" {
-				fmt.Printf("  %d. %s\n", i+1, file)
+		// Display old format
+		if len(files) == 0 || (len(files) == 1 && files[0] == "") {
+			fmt.Println("  No files available")
+		} else {
+			for i, file := range files {
+				if file != "" {
+					fmt.Printf("  %d. %s\n", i+1, file)
+				}
 			}
 		}
 	}
@@ -325,11 +453,11 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 
 func handleFileListRequest(conn net.Conn) {
 	// Collect filenames from all shared files
-	var fileNames []string
+	var fileList []string
 
 	// Add explicitly shared files
 	for _, path := range sharedFiles {
-		fileNames = append(fileNames, filepath.Base(path))
+		fileList = append(fileList, filepath.Base(path))
 	}
 
 	// Check for files in the shared directory
@@ -340,15 +468,22 @@ func handleFileListRequest(conn net.Conn) {
 		if err == nil {
 			for _, file := range files {
 				if !file.IsDir() {
-					fileNames = append(fileNames, file.Name())
+					fileList = append(fileList, file.Name())
 				}
 			}
 		}
 	}
 
-	// Build the response
-	fileList := strings.Join(fileNames, ",")
-	response := fmt.Sprintf("FILE_LIST:%s", fileList)
+	// Get hash information for files
+	var response string
+	if hashManager != nil {
+		// Get hash information for the files
+		hashInfo := hashManager.GetFileHashesAsString(fileList)
+		response = fmt.Sprintf("FILE_LIST:%s", hashInfo)
+	} else {
+		// Fallback to old format without hashes
+		response = fmt.Sprintf("FILE_LIST:%s", strings.Join(fileList, ","))
+	}
 
 	// Send the file list
 	_, err = conn.Write([]byte(response))
@@ -368,6 +503,15 @@ func requestFileFromPeer(host string, port int, filename string) {
 		if !exists {
 			fmt.Println("Failed to connect to peer")
 			return
+		}
+	}
+
+	// Check if we have hash information for this file
+	var expectedHash string
+	if hashManager != nil {
+		if hashInfo, exists := hashManager.GetFileHash(filename); exists {
+			expectedHash = hashInfo.Hash
+			fmt.Printf("Found hash information for %s, will verify integrity\n", filename)
 		}
 	}
 
@@ -416,14 +560,14 @@ func requestFileFromPeer(host string, port int, filename string) {
 		return
 	}
 
-	// Parse file header (expected format: "FILE_DATA:filename:filesize:")
+	// Parse file header (expected format: "FILE_DATA:filename:filesize:filehash:")
 	if !strings.HasPrefix(response, "FILE_DATA:") {
 		fmt.Printf("Unexpected response: %s\n", response)
 		return
 	}
 
-	// Extract filename and filesize from header
-	headerParts := strings.SplitN(response, ":", 4)
+	// Extract filename, filesize, and filehash (if provided)
+	headerParts := strings.SplitN(response, ":", 5)
 	if len(headerParts) < 3 {
 		fmt.Printf("Invalid file header: %s\n", response)
 		return
@@ -434,6 +578,28 @@ func requestFileFromPeer(host string, port int, filename string) {
 	if err != nil {
 		fmt.Printf("Invalid file size in header: %s\n", headerParts[2])
 		return
+	}
+
+	// Check if hash is included
+	receivedHash := ""
+	if len(headerParts) >= 4 && headerParts[3] != "" {
+		receivedHash = headerParts[3]
+		fmt.Printf("Received file hash: %s\n", receivedHash)
+	}
+
+	// If we have a hash from before and it doesn't match the received hash, warn the user
+	if expectedHash != "" && receivedHash != "" && expectedHash != receivedHash {
+		fmt.Printf("⚠️ Warning: Received file hash differs from expected hash!\n")
+		fmt.Printf("   Expected: %s\n", expectedHash)
+		fmt.Printf("   Received: %s\n", receivedHash)
+
+		fmt.Print("Continue with download? (y/n): ")
+		var decision string
+		fmt.Scanln(&decision)
+		if strings.ToLower(decision) != "y" {
+			fmt.Println("Download canceled")
+			return
+		}
 	}
 
 	fmt.Printf("Receiving file: %s (%d bytes)\n", transferFilename, filesize)
@@ -447,8 +613,14 @@ func requestFileFromPeer(host string, port int, filename string) {
 	}
 	defer file.Close()
 
+	// Calculate header size based on parts
+	headerSize := len(headerParts[0]) + len(headerParts[1]) + len(headerParts[2])
+	if receivedHash != "" {
+		headerSize += len(receivedHash) + 1 // +1 for the colon
+	}
+	headerSize += 3 // for the 3 (or 4) colons
+
 	// Write any data already received after the header
-	headerSize := len(headerParts[0]) + len(headerParts[1]) + len(headerParts[2]) + 3 // 3 for the colons
 	if n > headerSize {
 		_, err = file.Write(buffer[headerSize:n])
 		if err != nil {
@@ -477,6 +649,42 @@ func requestFileFromPeer(host string, port int, filename string) {
 			percentComplete := float64(bytesReceived) / float64(filesize) * 100
 			if bytesReceived%40960 == 0 { // Log every ~40KB
 				fmt.Printf("Receiving: %.1f%%\n", percentComplete)
+			}
+		}
+
+		// Verify file hash if available
+		if hashManager != nil && (receivedHash != "" || expectedHash != "") {
+			hashToVerify := receivedHash
+			if expectedHash != "" {
+				// Prefer our existing hash if available
+				hashToVerify = expectedHash
+			}
+
+			fmt.Println("Verifying file integrity...")
+			verified, err := hashManager.VerifyFileHash(savePath, hashToVerify)
+			if err != nil || !verified {
+				fmt.Printf("⚠️ File verification failed: %v\n", err)
+
+				// Ask if user wants to keep the file
+				fmt.Print("Keep potentially corrupted file? (y/n): ")
+				var keepFile string
+				fmt.Scanln(&keepFile)
+				if strings.ToLower(keepFile) != "y" {
+					os.Remove(savePath)
+					fmt.Println("File deleted")
+					return
+				}
+				fmt.Println("File kept despite verification failure")
+			} else {
+				fmt.Println("✅ File integrity verified successfully")
+
+				// Store hash information if we didn't have it before
+				if expectedHash == "" && receivedHash != "" {
+					_, err := hashManager.AddFileHash(transferFilename, savePath, fullAddress)
+					if err != nil {
+						fmt.Printf("Warning: Failed to store file hash: %v\n", err)
+					}
+				}
 			}
 		}
 
@@ -555,6 +763,23 @@ func handleFileRequest(conn net.Conn, filename string) {
 		return
 	}
 
+	// Get or compute the file hash if hash manager is available
+	var fileHash string
+	if hashManager != nil {
+		hashInfo, exists := hashManager.GetFileHash(filename)
+		if exists {
+			fileHash = hashInfo.Hash
+		} else {
+			// Calculate and store the hash
+			var err error
+			fileHash, err = hashManager.AddFileHash(filename, filePath, "")
+			if err != nil {
+				fmt.Printf("Warning: Failed to calculate file hash: %v\n", err)
+				// Continue without hash if calculation fails
+			}
+		}
+	}
+
 	// Open and read the file
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -571,8 +796,15 @@ func handleFileRequest(conn net.Conn, filename string) {
 	}
 
 	fileSize := fileInfo.Size()
-	// Send file header (compatible with Python client expectations)
-	header := fmt.Sprintf("FILE_DATA:%s:%d:", filepath.Base(filePath), fileSize)
+
+	// Send file header with hash information if available
+	var header string
+	if fileHash != "" {
+		header = fmt.Sprintf("FILE_DATA:%s:%d:%s:", filepath.Base(filePath), fileSize, fileHash)
+	} else {
+		header = fmt.Sprintf("FILE_DATA:%s:%d:", filepath.Base(filePath), fileSize)
+	}
+
 	_, err = conn.Write([]byte(header))
 	if err != nil {
 		fmt.Printf("Error sending file header: %v\n", err)
