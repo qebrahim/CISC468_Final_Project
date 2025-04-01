@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -217,18 +219,196 @@ func listAvailableFiles() {
 
 	fmt.Println("\nRequesting file lists from connected peers...")
 
+	// We'll use a wait group to wait for all responses
+	var wg sync.WaitGroup
+
+	// Create a channel to collect file list responses
+	// Using a buffered channel to avoid deadlocks
+	responses := make(chan struct {
+		peerAddr string
+		fileList string
+	}, len(connectedPeers))
+
 	for peerAddr, conn := range connectedPeers {
 		fmt.Printf("Requesting files from %s...\n", peerAddr)
 
-		// Send file list request message with a colon as delimiter to match Python server expectations
-		_, err := conn.Write([]byte("LIST_FILES:"))
-		if err != nil {
-			fmt.Printf("Error requesting file list from %s: %v\n", peerAddr, err)
-			continue
+		// Add to wait group before starting goroutine
+		wg.Add(1)
+
+		// Send file list request and process the response in a goroutine
+		go func(addr string, c net.Conn) {
+			defer wg.Done()
+
+			// Create a dedicated connection for the file list request
+			hostPort := strings.Split(addr, ":")
+			if len(hostPort) != 2 {
+				fmt.Printf("Invalid peer address format: %s\n", addr)
+				return
+			}
+
+			host := hostPort[0]
+			port, err := strconv.Atoi(hostPort[1])
+			if err != nil {
+				fmt.Printf("Invalid port in peer address: %s\n", addr)
+				return
+			}
+
+			newConn, err := net.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+			if err != nil {
+				fmt.Printf("Error connecting to %s: %v\n", addr, err)
+				return
+			}
+			defer newConn.Close()
+
+			// Send file list request
+			_, err = newConn.Write([]byte("LIST_FILES:"))
+			if err != nil {
+				fmt.Printf("Error requesting file list from %s: %v\n", addr, err)
+				return
+			}
+
+			// Read response with timeout
+			newConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+			// Use a buffered reader for potentially large responses
+			reader := bufio.NewReader(newConn)
+			response, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				fmt.Printf("Error reading file list from %s: %v\n", addr, err)
+				return
+			}
+
+			// Reset deadline
+			newConn.SetReadDeadline(time.Time{})
+
+			// Check if it's a valid file list response
+			if strings.HasPrefix(response, "FILE_LIST:") {
+				parts := strings.SplitN(response, ":", 2)
+				fileListContent := ""
+				if len(parts) > 1 {
+					fileListContent = parts[1]
+				}
+
+				// Debug output
+				fmt.Printf("Received file list from %s: %s\n", addr, fileListContent)
+
+				// Send to our channel
+				responses <- struct {
+					peerAddr string
+					fileList string
+				}{
+					peerAddr: addr,
+					fileList: fileListContent,
+				}
+			} else {
+				fmt.Printf("Unexpected response from %s: %s\n", addr, response)
+			}
+		}(peerAddr, conn)
+	}
+
+	// Close the channel when all goroutines are done
+	go func() {
+		wg.Wait()
+		close(responses)
+	}()
+
+	// Process all responses
+	receivedLists := 0
+	for resp := range responses {
+		displayFileList(resp.peerAddr, resp.fileList)
+		receivedLists++
+	}
+
+	if receivedLists == 0 {
+		fmt.Println("Did not receive any file lists from peers")
+	}
+}
+
+// Helper function to display file list
+func displayFileList(peerAddr, fileList string) {
+	fmt.Printf("\nFiles available from %s:\n", peerAddr)
+
+	if fileList == "" {
+		fmt.Println("  No files available")
+		return
+	}
+
+	// Check if the list is in the new format with hashes or old format
+	if strings.Contains(fileList, ";") {
+		// New format with hash information
+		fileEntries := strings.Split(fileList, ";")
+
+		if len(fileEntries) == 0 || (len(fileEntries) == 1 && fileEntries[0] == "") {
+			fmt.Println("  No files available")
+			return
 		}
 
-		// Process the response in a separate goroutine to avoid blocking
-		go receiveFileList(conn, peerAddr)
+		for i, entry := range fileEntries {
+			if entry == "" {
+				continue
+			}
+
+			// Parse file,hash,size triplet
+			fileParts := strings.Split(entry, ",")
+			filename := fileParts[0]
+			hash := ""
+			size := ""
+
+			if len(fileParts) >= 2 {
+				hash = fileParts[1]
+			}
+
+			if len(fileParts) >= 3 {
+				size = fileParts[2]
+			}
+
+			// Format output
+			sizeStr := ""
+			if size != "" {
+				sizeInt, err := strconv.ParseInt(size, 10, 64)
+				if err == nil {
+					sizeStr = fmt.Sprintf(" (%d bytes)", sizeInt)
+				}
+			}
+
+			verifiedStr := ""
+			if hash != "" {
+				verifiedStr = " [verifiable]"
+			}
+
+			fmt.Printf("  %d. %s%s%s\n", i+1, filename, sizeStr, verifiedStr)
+
+			// Store hash information if hash manager is available
+			if hashManager != nil && hash != "" {
+				sizeInt, _ := strconv.ParseInt(size, 10, 64)
+
+				hashManager.Hashes[filename] = crypto.FileHashInfo{
+					Hash:         hash,
+					Size:         sizeInt,
+					OriginPeer:   peerAddr,
+					LastVerified: float64(time.Now().Unix()),
+				}
+			}
+		}
+
+		// Save updated hashes
+		if hashManager != nil {
+			hashManager.SaveHashes()
+		}
+	} else {
+		// Old format (comma-separated filenames only)
+		files := strings.Split(fileList, ",")
+
+		if len(files) == 0 || (len(files) == 1 && files[0] == "") {
+			fmt.Println("  No files available")
+			return
+		}
+
+		for i, file := range files {
+			if file != "" {
+				fmt.Printf("  %d. %s\n", i+1, file)
+			}
+		}
 	}
 }
 
@@ -267,6 +447,13 @@ func receiveFileList(conn net.Conn, peerAddr string) {
 	}
 
 	fileList := parts[1]
+
+	// Handle empty file list
+	if fileList == "" {
+		fmt.Printf("\nFiles available from %s:\n", peerAddr)
+		fmt.Println("  No files available")
+		return
+	}
 
 	// Check if the response is in the new format with hashes or old format
 	var files []string
@@ -329,7 +516,11 @@ func receiveFileList(conn net.Conn, peerAddr string) {
 		}
 	} else {
 		// Old format (comma-separated filenames only)
-		files = strings.Split(fileList, ",")
+		if fileList != "" { // Handle empty list
+			files = strings.Split(fileList, ",")
+		} else {
+			files = []string{}
+		}
 	}
 
 	// Display the file list
@@ -432,6 +623,11 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 			case "FILE_DATA":
 				// Handle incoming file data (processed in requestFileFromPeer)
 
+			case "FILE_LIST":
+				// This is a response to our LIST_FILES request, not a command
+				// It should be handled by receiveFileList, not here
+				// This entry is just to prevent "Unknown command" messages
+
 			case "LIST_FILES":
 				handleFileListRequest(conn)
 
@@ -493,18 +689,13 @@ func handleFileListRequest(conn net.Conn) {
 }
 
 func requestFileFromPeer(host string, port int, filename string) {
-	fullAddress := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	conn, exists := connectedPeers[fullAddress]
-
-	if !exists {
-		fmt.Printf("Not connected to %s, attempting to connect...\n", fullAddress)
-		connectToPeer(host, port)
-		conn, exists = connectedPeers[fullAddress]
-		if !exists {
-			fmt.Println("Failed to connect to peer")
-			return
-		}
+	// Create a new, dedicated connection for file transfer
+	newConn, err := net.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	if err != nil {
+		fmt.Printf("Failed to connect for file transfer: %v\n", err)
+		return
 	}
+	defer newConn.Close()
 
 	// Check if we have hash information for this file
 	var expectedHash string
@@ -515,15 +706,15 @@ func requestFileFromPeer(host string, port int, filename string) {
 		}
 	}
 
-	// Send file request message (compatible with Python server)
+	// Send file request message
 	requestMsg := fmt.Sprintf("REQUEST_FILE:%s", filename)
-	_, err := conn.Write([]byte(requestMsg))
+	_, err = newConn.Write([]byte(requestMsg))
 	if err != nil {
 		fmt.Printf("Failed to send file request: %v\n", err)
 		return
 	}
 
-	fmt.Printf("File request for '%s' sent to %s\n", filename, fullAddress)
+	fmt.Printf("File request for '%s' sent to %s:%d\n", filename, host, port)
 
 	// Create a directory for downloads if it doesn't exist
 	homeDir, err := os.UserHomeDir()
@@ -539,53 +730,61 @@ func requestFileFromPeer(host string, port int, filename string) {
 		return
 	}
 
-	// Receive the file data (now compatible with Python server)
-	buffer := make([]byte, 4096)
-	n, err := conn.Read(buffer)
+	// For better debug information
+	fmt.Println("Reading response...")
+
+	// Use a buffered reader for more reliable protocol parsing
+	reader := bufio.NewReader(newConn)
+
+	// Read the first line which should contain the header
+	headerLine, err := reader.ReadString(':')
 	if err != nil {
-		fmt.Printf("Error reading response: %v\n", err)
+		fmt.Printf("Error reading header: %v\n", err)
 		return
 	}
 
-	response := string(buffer[:n])
-
 	// Check for error response
-	if strings.HasPrefix(response, "ERR") {
-		errParts := strings.SplitN(response, ":", 2)
-		if len(errParts) > 1 {
-			fmt.Printf("Error from peer: %s\n", errParts[1])
-		} else {
-			fmt.Println("File not found or request denied")
-		}
+	if strings.HasPrefix(headerLine, "ERR") {
+		fmt.Printf("Error from peer: %s\n", headerLine)
 		return
 	}
 
 	// Parse file header (expected format: "FILE_DATA:filename:filesize:filehash:")
-	if !strings.HasPrefix(response, "FILE_DATA:") {
-		fmt.Printf("Unexpected response: %s\n", response)
+	if !strings.HasPrefix(headerLine, "FILE_DATA:") {
+		fmt.Printf("Unexpected response: %s\n", headerLine)
 		return
 	}
 
-	// Extract filename, filesize, and filehash (if provided)
-	headerParts := strings.SplitN(response, ":", 5)
-	if len(headerParts) < 3 {
-		fmt.Printf("Invalid file header: %s\n", response)
-		return
-	}
-
-	transferFilename := headerParts[1]
-	filesize, err := strconv.Atoi(headerParts[2])
+	// Continue reading header parts
+	filenamePart, err := reader.ReadString(':')
 	if err != nil {
-		fmt.Printf("Invalid file size in header: %s\n", headerParts[2])
+		fmt.Printf("Error reading filename: %v\n", err)
+		return
+	}
+	transferFilename := filenamePart[:len(filenamePart)-1] // Remove trailing colon
+
+	filesizePart, err := reader.ReadString(':')
+	if err != nil {
+		fmt.Printf("Error reading filesize: %v\n", err)
+		return
+	}
+	filesizeStr := filesizePart[:len(filesizePart)-1] // Remove trailing colon
+	filesize, err := strconv.Atoi(filesizeStr)
+	if err != nil {
+		fmt.Printf("Invalid file size: %s\n", filesizeStr)
 		return
 	}
 
-	// Check if hash is included
-	receivedHash := ""
-	if len(headerParts) >= 4 && headerParts[3] != "" {
-		receivedHash = headerParts[3]
-		fmt.Printf("Received file hash: %s\n", receivedHash)
+	// Read hash if present
+	hashPart, err := reader.ReadString(':')
+	if err != nil {
+		fmt.Printf("Error reading hash: %v\n", err)
+		return
 	}
+	receivedHash := hashPart[:len(hashPart)-1] // Remove trailing colon
+
+	fmt.Printf("Header parsed successfully: filename=%s, size=%d, hash=%s\n",
+		transferFilename, filesize, receivedHash)
 
 	// If we have a hash from before and it doesn't match the received hash, warn the user
 	if expectedHash != "" && receivedHash != "" && expectedHash != receivedHash {
@@ -613,83 +812,93 @@ func requestFileFromPeer(host string, port int, filename string) {
 	}
 	defer file.Close()
 
-	// Calculate header size based on parts
-	headerSize := len(headerParts[0]) + len(headerParts[1]) + len(headerParts[2])
-	if receivedHash != "" {
-		headerSize += len(receivedHash) + 1 // +1 for the colon
-	}
-	headerSize += 3 // for the 3 (or 4) colons
+	// Read the file data directly into the file
+	bytesReceived := 0
+	buffer := make([]byte, 4096)
 
-	// Write any data already received after the header
-	if n > headerSize {
-		_, err = file.Write(buffer[headerSize:n])
+	for bytesReceived < filesize {
+		n, err := newConn.Read(buffer)
+		if err != nil && err != io.EOF {
+			fmt.Printf("Error receiving file data: %v\n", err)
+			return
+		}
+
+		if n == 0 {
+			break // End of file
+		}
+
+		// Write data to file
+		bytesToWrite := n
+		if bytesReceived+n > filesize {
+			bytesToWrite = filesize - bytesReceived
+		}
+
+		_, err = file.Write(buffer[:bytesToWrite])
 		if err != nil {
 			fmt.Printf("Error writing to file: %v\n", err)
 			return
 		}
-		bytesReceived := n - headerSize
 
-		// Continue receiving the file
-		for bytesReceived < filesize {
-			n, err = conn.Read(buffer)
-			if err != nil {
-				fmt.Printf("Error receiving file data: %v\n", err)
-				return
-			}
+		bytesReceived += bytesToWrite
 
-			_, err = file.Write(buffer[:n])
-			if err != nil {
-				fmt.Printf("Error writing to file: %v\n", err)
-				return
-			}
-
-			bytesReceived += n
-
-			// Display progress
-			percentComplete := float64(bytesReceived) / float64(filesize) * 100
-			if bytesReceived%40960 == 0 { // Log every ~40KB
-				fmt.Printf("Receiving: %.1f%%\n", percentComplete)
-			}
+		// Display progress
+		percentComplete := float64(bytesReceived) / float64(filesize) * 100
+		if bytesReceived%40960 == 0 || bytesReceived == filesize { // Log every ~40KB or at completion
+			fmt.Printf("Receiving: %.1f%%\n", percentComplete)
 		}
 
-		// Verify file hash if available
-		if hashManager != nil && (receivedHash != "" || expectedHash != "") {
-			hashToVerify := receivedHash
-			if expectedHash != "" {
-				// Prefer our existing hash if available
-				hashToVerify = expectedHash
-			}
-
-			fmt.Println("Verifying file integrity...")
-			verified, err := hashManager.VerifyFileHash(savePath, hashToVerify)
-			if err != nil || !verified {
-				fmt.Printf("⚠️ File verification failed: %v\n", err)
-
-				// Ask if user wants to keep the file
-				fmt.Print("Keep potentially corrupted file? (y/n): ")
-				var keepFile string
-				fmt.Scanln(&keepFile)
-				if strings.ToLower(keepFile) != "y" {
-					os.Remove(savePath)
-					fmt.Println("File deleted")
-					return
-				}
-				fmt.Println("File kept despite verification failure")
-			} else {
-				fmt.Println("✅ File integrity verified successfully")
-
-				// Store hash information if we didn't have it before
-				if expectedHash == "" && receivedHash != "" {
-					_, err := hashManager.AddFileHash(transferFilename, savePath, fullAddress)
-					if err != nil {
-						fmt.Printf("Warning: Failed to store file hash: %v\n", err)
-					}
-				}
-			}
+		if bytesReceived >= filesize {
+			break
 		}
-
-		fmt.Printf("File downloaded successfully to %s\n", savePath)
 	}
+
+	if bytesReceived < filesize {
+		fmt.Printf("Warning: Received only %d of %d bytes\n", bytesReceived, filesize)
+	}
+
+	// Verify file hash if available
+	if hashManager != nil && (receivedHash != "" || expectedHash != "") {
+		hashToVerify := receivedHash
+		if expectedHash != "" {
+			// Prefer our existing hash if available
+			hashToVerify = expectedHash
+		}
+
+		fmt.Println("Verifying file integrity...")
+		verified, err := hashManager.VerifyFileHash(savePath, hashToVerify)
+		if err != nil || !verified {
+			fmt.Printf("⚠️ File verification failed: %v\n", err)
+
+			// Ask if user wants to keep the file
+			fmt.Print("Keep potentially corrupted file? (y/n): ")
+			var keepFile string
+			fmt.Scanln(&keepFile)
+			if strings.ToLower(keepFile) != "y" {
+				os.Remove(savePath)
+				fmt.Println("File deleted")
+				return
+			}
+			fmt.Println("File kept despite verification failure")
+		} else {
+			fmt.Println("✅ File integrity verified successfully")
+
+			// Store hash information for potential alternate source lookups
+			if expectedHash == "" && receivedHash != "" {
+				sourceAddr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+				_, err := hashManager.AddFileHash(transferFilename, savePath, sourceAddr)
+				if err != nil {
+					fmt.Printf("Warning: Failed to store file hash: %v\n", err)
+				} else {
+					fmt.Printf("Hash for %s saved successfully\n", transferFilename)
+				}
+			}
+		}
+	}
+
+	fmt.Printf("File downloaded successfully to %s\n", savePath)
+
+	// Update the list of shared files
+	sharedFiles = append(sharedFiles, savePath)
 }
 
 func setupSignalHandling() {

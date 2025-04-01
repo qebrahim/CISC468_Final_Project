@@ -5,6 +5,7 @@ import random
 import logging
 import os.path
 from pathlib import Path
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,9 @@ def handle_file_request(conn, addr, filename):
 
             conn.sendall(header.encode('utf-8'))
 
+            # Small delay to ensure header is processed separately
+            time.sleep(0.05)
+
             # Send file data in chunks
             chunk_size = 4096
             bytes_sent = 0
@@ -200,6 +204,27 @@ def handle_file_request(conn, addr, filename):
                     logger.info(f"Sending: {percent_complete:.1f}%")
 
             logger.info(f"File {filename} sent successfully")
+
+            # Add file to shared files list if not already there
+            basename = os.path.basename(file_path)
+            shared_path = Path.home() / '.p2p-share' / 'shared' / basename
+
+            # First ensure the file exists in our shared directory
+            try:
+                if not shared_path.exists():
+                    # Copy file to shared directory if it's not already there
+                    shared_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(file_path, 'rb') as src, open(shared_path, 'wb') as dst:
+                        dst.write(src.read())
+                    logger.info(f"Copied {basename} to shared directory")
+
+                # Add to shared files list if not already present
+                str_path = str(shared_path)
+                if str_path not in shared_files:
+                    shared_files.append(str_path)
+                    logger.info(f"Added {basename} to shared files list")
+            except Exception as e:
+                logger.warning(f"Error adding file to shared directory: {e}")
 
     except Exception as e:
         error_msg = f"ERR:FILE_TRANSFER_FAILED:{str(e)}"
