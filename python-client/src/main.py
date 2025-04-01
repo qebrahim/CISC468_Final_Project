@@ -72,12 +72,18 @@ class P2PApplication:
             logger.error(f"Error running P2P application: {e}")
             self.shutdown()
 
-    def _on_peer_connected(self, addr):
-        """Callback method when a new peer connects"""
-        peer_address = f"{addr[0]}:{addr[1]}"
-        logger.info(f"New peer connected: {peer_address}")
-        self.connected_peers.add(peer_address)
-        self.connection_event.set()  # Signal that we have a connection
+
+def _on_peer_connected(self, addr):
+    """Callback method when a new peer connects"""
+    peer_address = f"{addr[0]}:{addr[1]}"
+    logger.info(f"New peer connected: {peer_address}")
+
+    # Always use the standard port for communication, not the ephemeral port
+    # This fixes the issue where we try to connect back to the wrong port
+    standard_peer_address = f"{addr[0]}:12345"
+
+    self.connected_peers.add(standard_peer_address)
+    self.connection_event.set()  # Signal that we have a connection
 
     def _on_peer_disconnected(self, addr):
         """Callback method when a peer disconnects"""

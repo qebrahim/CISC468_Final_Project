@@ -24,6 +24,9 @@ var connectedPeers map[string]net.Conn
 var sharedFiles []string
 var hashManager *crypto.HashManager
 
+// Global server port
+const serverPort = 12345
+
 func main() {
 	// Initialize
 	connectedPeers = make(map[string]net.Conn)
@@ -46,6 +49,9 @@ func main() {
 
 	// Set up signal handling for graceful shutdown
 	setupSignalHandling()
+
+	// Start TCP server to listen for incoming connections
+	startServer()
 
 	// Discover initial peers
 	fmt.Println("🔍 Browsing for services...")
@@ -70,6 +76,38 @@ func main() {
 
 	// Start the command-line interface
 	runCommandLineInterface()
+}
+
+// startServer initializes a TCP server to handle incoming connections
+func startServer() {
+	// Start server on a separate goroutine
+	go func() {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
+		if err != nil {
+			fmt.Printf("❌ Error starting server: %v\n", err)
+			return
+		}
+		defer listener.Close()
+
+		fmt.Printf("✅ Server listening on port %d\n", serverPort)
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				fmt.Printf("❌ Error accepting connection: %v\n", err)
+				continue
+			}
+
+			remoteAddr := conn.RemoteAddr().String()
+			fmt.Printf("✅ Accepted connection from %s\n", remoteAddr)
+
+			// Store connection in connected peers map
+			connectedPeers[remoteAddr] = conn
+
+			// Handle connection in a goroutine
+			go handlePeerConnection(conn, remoteAddr)
+		}
+	}()
 }
 
 func generatePeerID() string {

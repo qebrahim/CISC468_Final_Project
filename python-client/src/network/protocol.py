@@ -299,11 +299,13 @@ def request_file(host='localhost', port=12345, filename=''):
     """Request a file from a peer"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        logger.info(f"Connecting to {host}:{port} to request file {filename}")
         sock.connect((host, port))
 
         # Send the request using the expected format
         request_msg = f"REQUEST_FILE:{filename}"
         sock.sendall(request_msg.encode('utf-8'))
+        logger.info(f"Sent request: {request_msg}")
 
         # Receive initial response
         initial_response = sock.recv(4096)
@@ -312,6 +314,7 @@ def request_file(host='localhost', port=12345, filename=''):
             return False
 
         response = initial_response.decode('utf-8', errors='ignore')
+        logger.info(f"Received initial response: {response[:100]}...")
 
         # Check for error response
         if response.startswith("ERR"):
@@ -357,17 +360,17 @@ def request_file(host='localhost', port=12345, filename=''):
         save_path = save_dir / file_save_as
 
         # Calculate header size based on number of fields
-        # 3 colons minimum
-        header_size = len(
-            header_parts[0]) + len(header_parts[1]) + len(header_parts[2]) + 3
-        if file_hash:
-            header_size += len(file_hash) + 1  # +1 for additional colon
+        # Header is everything up to and including the last colon
+        header_end_pos = response.rfind(':')
+        if header_end_pos == -1:
+            logger.error("Could not find end of header")
+            return False
 
         with open(save_path, 'wb') as f:
             # Write any data already received after the header
-            if len(initial_response) > header_size:
-                f.write(initial_response[header_size:])
-                bytes_received = len(initial_response) - header_size
+            if len(initial_response) > header_end_pos + 1:
+                f.write(initial_response[header_end_pos + 1:])
+                bytes_received = len(initial_response) - (header_end_pos + 1)
             else:
                 bytes_received = 0
 
