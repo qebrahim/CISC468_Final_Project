@@ -87,8 +87,35 @@ func main() {
 
 // setupSecurity initializes the authentication and secure channel systems
 func setupSecurity(peerID string) {
+	// Create keys directory if it doesn't exist
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("⚠️ Warning: Failed to get home directory: %v\n", err)
+		return
+	}
+
+	keysDir := filepath.Join(homeDir, ".p2p-share", "keys")
+	err = os.MkdirAll(keysDir, 0755)
+	if err != nil {
+		fmt.Printf("⚠️ Warning: Failed to create keys directory: %v\n", err)
+		return
+	}
+
+	privateKeyPath := filepath.Join(keysDir, "private.pem")
+	publicKeyPath := filepath.Join(keysDir, "public.pem")
+
+	// Check if key files exist, generate them if not
+	if _, err := os.Stat(privateKeyPath); os.IsNotExist(err) {
+		fmt.Println("Generating new key pair...")
+		err = crypto.GenerateKeyPair(privateKeyPath, publicKeyPath)
+		if err != nil {
+			fmt.Printf("⚠️ Warning: Failed to generate key pair: %v\n", err)
+			return
+		}
+		fmt.Println("✅ Key pair generated successfully")
+	}
+
 	// Initialize contact manager
-	var err error
 	contactManager, err = crypto.NewContactManager(peerID)
 	if err != nil {
 		fmt.Printf("⚠️ Warning: Failed to initialize contact manager: %v\n", err)

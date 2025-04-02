@@ -25,7 +25,7 @@ def start_server(host='0.0.0.0', port=12345, connection_callback=None, peer_id=N
     # Initialize hash manager if peer_id is provided
     if peer_id:
         init_hash_manager(peer_id)
-        
+
         # Initialize authentication system
         init_auth_system(peer_id)
 
@@ -70,29 +70,31 @@ def process_pending_verifications():
     """Process any pending verification requests"""
     if not contact_manager or not authentication:
         return
-    
+
     try:
         from crypto import auth_protocol
         pending = auth_protocol.get_pending_verifications()
-        
+
         if pending:
             print("\nPending authentication requests:")
             for idx, (peer_id, data) in enumerate(pending.items(), 1):
-                print(f"{idx}. Peer {peer_id} - {data['contact_data']['address']}")
-                
+                print(
+                    f"{idx}. Peer {peer_id} - {data['contact_data']['address']}")
+
             print("\nEnter request number to process (or 0 to skip): ", end="")
             try:
                 choice = int(input())
                 if choice == 0:
                     return
-                
+
                 if 1 <= choice <= len(pending):
                     selected_peer_id = list(pending.keys())[choice - 1]
-                    
+
                     print(f"Verify peer {selected_peer_id}? (y/n): ", end="")
                     confirm = input().lower().strip()
-                    
-                    auth_protocol.process_verification_response(selected_peer_id, confirm == 'y')
+
+                    auth_protocol.process_verification_response(
+                        selected_peer_id, confirm == 'y')
             except ValueError:
                 print("Invalid choice")
     except Exception as e:
@@ -106,9 +108,9 @@ def handle_secure_file_receive(peer_id, message_type, payload):
         global secure_file_transfers
         if not hasattr(handle_secure_file_receive, 'secure_file_transfers'):
             handle_secure_file_receive.secure_file_transfers = {}
-        
+
         secure_file_transfers = handle_secure_file_receive.secure_file_transfers
-        
+
         if message_type == "FILE_HEADER":
             # Start a new file transfer
             try:
@@ -116,16 +118,16 @@ def handle_secure_file_receive(peer_id, message_type, payload):
                 filename = header.get("filename")
                 filesize = header.get("size")
                 filehash = header.get("hash", None)
-                
+
                 if not filename or not filesize:
                     logger.error("Invalid file header")
                     return False
-                
+
                 # Prepare the output file
                 save_dir = Path.home() / '.p2p-share' / 'shared'
                 save_dir.mkdir(parents=True, exist_ok=True)
                 save_path = save_dir / filename
-                
+
                 # Store transfer state
                 secure_file_transfers[peer_id] = {
                     "filename": filename,
@@ -135,98 +137,101 @@ def handle_secure_file_receive(peer_id, message_type, payload):
                     "received": 0,
                     "file": open(save_path, 'wb')
                 }
-                
+
                 logger.info(f"Started secure file transfer for {filename}")
                 print(f"\nReceiving encrypted file: {filename}")
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Error handling secure file header: {e}")
                 return False
-                
+
         elif message_type == "FILE_CHUNK":
             # Process a file chunk
             if peer_id not in secure_file_transfers:
                 logger.error(f"No active file transfer for peer {peer_id}")
                 return False
-            
+
             transfer = secure_file_transfers[peer_id]
-            
+
             try:
                 # Decode the chunk
                 import base64
                 chunk = base64.b64decode(payload)
-                
+
                 # Write to file
                 transfer["file"].write(chunk)
                 transfer["received"] += len(chunk)
-                
+
                 # Log progress
                 if transfer["received"] % 40960 == 0 or transfer["received"] >= transfer["size"]:
                     percent = (transfer["received"] / transfer["size"]) * 100
                     print(f"Receiving: {percent:.1f}%", end="\r")
-                
+
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Error handling secure file chunk: {e}")
                 return False
-                
+
         elif message_type == "FILE_END":
             # Finish the file transfer
             if peer_id not in secure_file_transfers:
                 logger.error(f"No active file transfer for peer {peer_id}")
                 return False
-            
+
             transfer = secure_file_transfers[peer_id]
-            
+
             try:
                 # Close the file
                 transfer["file"].close()
-                
+
                 filename = transfer["filename"]
                 filepath = transfer["path"]
                 received = transfer["received"]
                 expected = transfer["size"]
                 filehash = transfer["hash"]
-                
+
                 # Check if we received all the data
                 if received < expected:
-                    logger.warning(f"Incomplete file transfer: {received}/{expected} bytes")
-                    print(f"\nWarning: Received only {received} of {expected} bytes")
+                    logger.warning(
+                        f"Incomplete file transfer: {received}/{expected} bytes")
+                    print(
+                        f"\nWarning: Received only {received} of {expected} bytes")
                 else:
                     logger.info(f"File transfer complete: {filename}")
                     print(f"\nFile received successfully: {filename}")
-                
+
                 # Verify hash if available
                 if hash_manager is not None and filehash:
                     if hash_manager.verify_file_hash(filepath, filehash):
                         logger.info("File hash verified successfully")
                         print("File integrity verified ✓")
-                        
+
                         # Store hash information
                         hash_manager.add_file_hash(filename, filepath, peer_id)
                     else:
                         logger.warning("File hash verification failed")
-                        print("⚠️ Warning: File verification failed. The file may be corrupted.")
-                
+                        print(
+                            "⚠️ Warning: File verification failed. The file may be corrupted.")
+
                 # Clean up
                 del secure_file_transfers[peer_id]
-                
+
                 # Add to shared files
                 if filepath not in shared_files:
                     shared_files.append(filepath)
-                
+
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Error handling secure file end: {e}")
                 return False
-                
+
         else:
             logger.error(f"Unknown secure file message type: {message_type}")
             return False
-            
+
     except Exception as e:
         logger.error(f"Error in secure file receive: {e}")
         return False
@@ -241,36 +246,37 @@ def handle_secure_protocol(message, peer_id, conn):
         if len(parts) < 2:
             logger.error(f"Invalid secure message format: {message}")
             return False
-            
+
         message_type = parts[0]
         payload = parts[1] if len(parts) > 1 else ""
-        
+
         # Handle different message types
         if message_type == "REQUEST_FILE":
             # Handle secure file request
             filename = payload
-            handle_file_request(conn, None, filename, secure=True, peer_id=peer_id)
+            handle_file_request(conn, None, filename,
+                                secure=True, peer_id=peer_id)
             return True
-            
+
         elif message_type == "FILE_HEADER" or message_type == "FILE_CHUNK" or message_type == "FILE_END":
             # Handle secure file transfer
             return handle_secure_file_receive(peer_id, message_type, payload)
-            
+
         elif message_type == "FILE_LIST":
             # Handle file list response
             display_file_list(peer_id, payload)
             return True
-            
+
         elif message_type == "ERROR":
             # Handle error message
             logger.error(f"Error from peer {peer_id}: {payload}")
             print(f"Error from peer: {payload}")
             return True
-            
+
         else:
             logger.warning(f"Unknown secure message type: {message_type}")
             return False
-            
+
     except Exception as e:
         logger.error(f"Error handling secure protocol message: {e}")
         return False
@@ -280,22 +286,22 @@ def display_file_list(peer_id_or_addr, file_list):
     """Display a list of files from a peer"""
     # Determine if we have peer_id or address
     peer_id = peer_id_or_addr
-    
+
     if ":" in peer_id_or_addr:  # It's an address
         if contact_manager:
             contact = contact_manager.get_contact_by_address(peer_id_or_addr)
             if contact:
                 peer_id = contact.get("peer_id", peer_id_or_addr)
-    
+
     print(f"\nFiles available from peer {peer_id}:")
-    
+
     if not file_list or file_list == "":
         print("  No files available")
         return
-        
+
     # Check for the separator character to determine the format
     file_entries = []
-    
+
     if ";" in file_list:
         # New format with multiple file entries separated by semicolons
         file_entries = file_list.split(";")
@@ -312,15 +318,15 @@ def display_file_list(peer_id_or_addr, file_list):
     else:
         # Single file with no metadata
         file_entries = [file_list]
-        
+
     if not file_entries or (len(file_entries) == 1 and file_entries[0] == ""):
         print("  No files available")
         return
-        
+
     for i, entry in enumerate(file_entries):
         if entry == "":
             continue
-            
+
         # Check if entry contains file metadata
         if entry.count(",") == 2:
             # Parse file,hash,size triplet
@@ -328,7 +334,7 @@ def display_file_list(peer_id_or_addr, file_list):
             filename = file_parts[0]
             hash_value = file_parts[1]
             size_str = file_parts[2]
-            
+
             # Format output
             size_display = ""
             if size_str:
@@ -342,11 +348,11 @@ def display_file_list(peer_id_or_addr, file_list):
                         size_display = f" ({size / (1024 * 1024):.1f} MB)"
                 except:
                     pass
-                    
+
             verified_str = " [verifiable]" if hash_value else ""
-            
+
             print(f"  {i+1}. {filename}{size_display}{verified_str}")
-            
+
             # Store hash information if hash manager is available
             if hash_manager and hash_value and filename:
                 try:
@@ -362,35 +368,38 @@ def display_file_list(peer_id_or_addr, file_list):
         else:
             # Single filename without metadata
             print(f"  {i+1}. {entry}")
-            
+
     # Save updated hashes if we're using hash manager
     if hash_manager:
         hash_manager.save_hashes()
 
+
 def init_auth_system(peer_id):
     """Initialize the authentication system with dependencies"""
     global contact_manager, authentication
-    
+
     try:
-        from  crypto.authentication import PeerAuthentication
+        from crypto.authentication import PeerAuthentication
         from crypto.contact_manager import ContactManager
         from crypto import auth_protocol
-        
+
         # Initialize the contact manager
         contact_manager = ContactManager(peer_id)
-        
+
         # Initialize the authentication system
         authentication = PeerAuthentication(peer_id, contact_manager)
-        
+
         # Initialize the authentication protocol
-        auth_protocol.init_authentication(peer_id, contact_manager, authentication)
-        
+        auth_protocol.init_authentication(
+            peer_id, contact_manager, authentication)
+
         logger.info(f"Authentication system initialized for peer {peer_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to initialize authentication system: {e}")
         logger.warning("Authentication will be disabled")
         return False
+
 
 def init_hash_manager(peer_id):
     """Initialize the hash manager with the given peer ID"""
@@ -475,32 +484,35 @@ def handle_request(conn, addr):
                 from crypto import auth_protocol
                 auth_protocol.handle_auth_message(conn, addr, message)
                 continue
-                
+
             # Check if this is a secure channel message
             if command == "SECURE":
                 # Handle it using the secure channel protocol
                 try:
                     from crypto.secure_channel import handle_secure_message
                     result = handle_secure_message(conn, addr, message)
-                    
+
                     # Process the result if needed
                     if result and result.get("status") == "message_received":
                         # This is a decrypted application message
                         type = result.get("type")
                         payload = result.get("payload")
                         peer_id = result.get("peer_id")
-                        
+
                         # Handle the decrypted message based on type
                         if type == "REQUEST_FILE":
-                            handle_file_request(conn, addr, payload, secure=True, peer_id=peer_id)
+                            handle_file_request(
+                                conn, addr, payload, secure=True, peer_id=peer_id)
                         elif type == "LIST_FILES":
-                            handle_list_files_request(conn, secure=True, peer_id=peer_id)
+                            handle_list_files_request(
+                                conn, secure=True, peer_id=peer_id)
                         else:
-                            logger.error(f"Unknown secure message type: {type}")
-                            
+                            logger.error(
+                                f"Unknown secure message type: {type}")
+
                 except Exception as e:
                     logger.error(f"Error handling secure message: {e}")
-                
+
                 continue
 
             # For sensitive operations, check if peer is authenticated
@@ -511,7 +523,8 @@ def handle_request(conn, addr):
                     peer_addr = f"{addr[0]}:12345"  # Use standard port
                     if not auth_protocol.check_peer_authenticated(peer_addr):
                         # Peer not authenticated - send error or initiate authentication
-                        logger.warning(f"Unauthenticated access attempt from {addr}")
+                        logger.warning(
+                            f"Unauthenticated access attempt from {addr}")
                         conn.sendall(b"ERR:AUTHENTICATION_REQUIRED")
                         continue
 
@@ -529,27 +542,30 @@ def handle_request(conn, addr):
                     if not auth_protocol.check_peer_authenticated(peer_addr):
                         conn.sendall(b"ERR:AUTHENTICATION_REQUIRED")
                         continue
-                    
+
                     # Get the peer's ID
-                    contact = auth_protocol.contact_manager.get_contact_by_address(peer_addr)
+                    contact = auth_protocol.contact_manager.get_contact_by_address(
+                        peer_addr)
                     if not contact:
                         conn.sendall(b"ERR:PEER_NOT_FOUND")
                         continue
-                        
+
                     peer_id = contact["peer_id"]
-                    
+
                     # Inform the user
-                    print(f"\nPeer {peer_id} requested to establish a secure encrypted channel.")
+                    print(
+                        f"\nPeer {peer_id} requested to establish a secure encrypted channel.")
                     print("Do you want to accept? (y/n): ", end="", flush=True)
-                    
+
                     # For now, auto-accept in this implementation
                     # In a real implementation, you'd want to ask the user
                     print("y (auto-accepted)")
-                    
+
                     # Respond with acceptance
                     conn.sendall(b"ESTABLISH_SECURE:ACCEPTED")
-                    
-                    logger.info(f"Accepted secure channel request from {peer_id}")
+
+                    logger.info(
+                        f"Accepted secure channel request from {peer_id}")
                 except Exception as e:
                     logger.error(f"Error handling secure channel request: {e}")
                     conn.sendall(b"ERR:INTERNAL_ERROR")
@@ -596,7 +612,7 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
 
     if not found:
         logger.info(f"File not found: {filename}")
-        
+
         if secure:
             # Send error through secure channel
             from crypto.secure_channel import get_secure_channel
@@ -609,7 +625,7 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
 
     # Ask for user consent
     requester = f"{addr[0]}:{addr[1]}" if addr else peer_id
-    
+
     # If authentication is active, show the trusted identity
     display_peer_id = "Unknown"
     if contact_manager:
@@ -625,19 +641,20 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             if contact:
                 peer_id = contact["peer_id"]
                 display_peer_id = contact.get("nickname", peer_id)
-    
+
     if secure:
         print(f"\nSecure file request from {display_peer_id} for {filename}. Allow? (y/n): ",
               end="", flush=True)
     else:
         print(f"\nAllow {display_peer_id} at {requester} to download {filename}? (y/n): ",
               end="", flush=True)
-    
+
     consent = input().lower().strip()
 
     if consent != 'y':
-        logger.info(f"User denied request for file {filename} from {requester}")
-        
+        logger.info(
+            f"User denied request for file {filename} from {requester}")
+
         if secure:
             # Send error through secure channel
             from crypto.secure_channel import get_secure_channel
@@ -670,7 +687,7 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
         else:
             # Send the file through regular connection
             send_file_regular(conn, file_path, file_hash)
-            
+
     except Exception as e:
         error_msg = f"ERR:FILE_TRANSFER_FAILED:{str(e)}"
         logger.error(f"Error sending file: {e}")
@@ -679,7 +696,8 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
                 from crypto.secure_channel import get_secure_channel
                 channel = get_secure_channel(peer_id)
                 if channel:
-                    channel.send_encrypted("ERROR", f"FILE_TRANSFER_FAILED:{str(e)}")
+                    channel.send_encrypted(
+                        "ERROR", f"FILE_TRANSFER_FAILED:{str(e)}")
             else:
                 conn.sendall(error_msg.encode('utf-8'))
         except:
@@ -721,11 +739,12 @@ def send_file_regular(conn, file_path, file_hash=None):
                 if bytes_sent % (chunk_size * 10) == 0:  # Log every ~40KB
                     logger.info(f"Sending: {percent_complete:.1f}%")
 
-            logger.info(f"File {os.path.basename(file_path)} sent successfully")
-            
+            logger.info(
+                f"File {os.path.basename(file_path)} sent successfully")
+
             # Update shared files list
             update_shared_files_list(file_path)
-            
+
     except Exception as e:
         logger.error(f"Error sending file: {e}")
         raise
@@ -735,64 +754,64 @@ def send_file_secure(peer_id, file_path, file_hash=None):
     """Send a file through a secure channel"""
     try:
         from crypto.secure_channel import get_secure_channel
-        
+
         # Get the secure channel
         channel = get_secure_channel(peer_id)
         if not channel:
             logger.error(f"No secure channel available for peer {peer_id}")
             return False
-        
+
         # Create a temporary encrypted version of the file
         file_size = os.path.getsize(file_path)
         basename = os.path.basename(file_path)
-        
+
         # Send file header with hash information if available
         header = {
             "filename": basename,
             "size": file_size
         }
-        
+
         if file_hash:
             header["hash"] = file_hash
-        
+
         # Send the header
         channel.send_encrypted("FILE_HEADER", json.dumps(header))
         logger.info(f"Sent secure file header for {basename}")
-        
+
         # Then send the file in chunks
         with open(file_path, 'rb') as file:
             chunk_size = 4096
             bytes_sent = 0
-            
+
             while bytes_sent < file_size:
                 chunk = file.read(chunk_size)
                 if not chunk:
                     break
-                
+
                 # Encode the chunk as base64 for JSON compatibility
                 import base64
                 chunk_b64 = base64.b64encode(chunk).decode('utf-8')
-                
+
                 # Send the chunk
                 channel.send_encrypted("FILE_CHUNK", chunk_b64)
-                
+
                 bytes_sent += len(chunk)
-                
+
                 # Log progress
                 percent_complete = (bytes_sent / file_size) * 100
                 if bytes_sent % (chunk_size * 10) == 0:  # Log every ~40KB
                     logger.info(f"Sending (secure): {percent_complete:.1f}%")
-            
+
             # Send end of file marker
             channel.send_encrypted("FILE_END", basename)
-            
+
         logger.info(f"File {basename} sent securely")
-        
+
         # Update shared files list
         update_shared_files_list(file_path)
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"Error sending file securely: {e}")
         return False
@@ -820,6 +839,8 @@ def update_shared_files_list(file_path):
             logger.info(f"Added {basename} to shared files list")
     except Exception as e:
         logger.warning(f"Error updating shared files: {e}")
+
+
 def handle_list_files_request(conn, secure=False, peer_id=None):
     """Handle request for list of shared files, including hash information"""
     try:
@@ -847,30 +868,32 @@ def handle_list_files_request(conn, secure=False, peer_id=None):
                 # New format with hash information, using semicolons between files
                 hash_info = hash_manager.get_file_hashes_as_string(
                     file_list)
-                
+
                 if secure:
                     # Send through secure channel
                     from crypto.secure_channel import get_secure_channel
                     channel = get_secure_channel(peer_id)
                     if channel:
                         channel.send_encrypted("FILE_LIST", hash_info)
-                        logger.info(f"Sent secure file list with {len(file_list)} files")
+                        logger.info(
+                            f"Sent secure file list with {len(file_list)} files")
                 else:
                     # Send through regular connection
                     response = f"FILE_LIST:{hash_info}"
                     conn.sendall(response.encode('utf-8'))
                     logger.info(f"Sent file list with {len(file_list)} files")
-                
+
             except Exception as e:
                 # Fallback to old format if hash manager fails
                 logger.warning(f"Error getting file hashes: {e}")
-                
+
                 if secure:
                     # Send through secure channel
                     from crypto.secure_channel import get_secure_channel
                     channel = get_secure_channel(peer_id)
                     if channel:
-                        channel.send_encrypted("FILE_LIST", ','.join(file_list))
+                        channel.send_encrypted(
+                            "FILE_LIST", ','.join(file_list))
                 else:
                     # Send through regular connection
                     response = f"FILE_LIST:{','.join(file_list)}"
@@ -887,12 +910,12 @@ def handle_list_files_request(conn, secure=False, peer_id=None):
                 # Send through regular connection
                 response = f"FILE_LIST:{','.join(file_list)}"
                 conn.sendall(response.encode('utf-8'))
-            
+
             logger.info(f"Sent file list with {len(file_list)} files")
 
     except Exception as e:
         logger.error(f"Error handling file list request: {e}")
-        
+
         if secure:
             from crypto.secure_channel import get_secure_channel
             channel = get_secure_channel(peer_id)
@@ -900,3 +923,183 @@ def handle_list_files_request(conn, secure=False, peer_id=None):
                 channel.send_encrypted("ERROR", "INTERNAL_ERROR")
         else:
             conn.sendall(b"ERR:INTERNAL_ERROR")
+
+
+def request_file(host, port, filename, use_secure=False):
+    """Request a file from a remote peer"""
+    try:
+        # Check if we're using secure channel
+        if use_secure:
+            logger.info(
+                f"Requesting file '{filename}' securely from {host}:{port}")
+
+            # Look up peer ID from address for secure channel
+            # Always use standard port for lookup
+            peer_address = f"{host}:12345"
+            if contact_manager is None:
+                logger.error(
+                    "Authentication system not initialized, secure transfer not available")
+                return False
+
+            contact = contact_manager.get_contact_by_address(peer_address)
+            if not contact:
+                logger.error(
+                    f"Peer {peer_address} not authenticated, secure transfer not available")
+                return False
+
+            peer_id = contact["peer_id"]
+
+            # Get or create secure channel
+            from crypto.secure_channel import get_secure_channel, establish_secure_channel
+
+            # Get existing channel or establish new one
+            channel = get_secure_channel(peer_id)
+            if not channel or not channel.established:
+                # Try to establish a secure channel
+                logger.info(f"Establishing secure channel with {peer_id}...")
+                result = establish_secure_channel(peer_id, f"{host}:{port}")
+
+                if result["status"] != "initiated":
+                    logger.error("Failed to initiate secure channel")
+                    return False
+
+                # Wait a moment for channel to establish
+                import time
+                time.sleep(1)
+
+                channel = get_secure_channel(peer_id)
+                if not channel or not channel.established:
+                    logger.error("Secure channel not established")
+                    return False
+
+            # Send the file request through secure channel
+            return channel.send_encrypted("REQUEST_FILE", filename)
+
+        else:
+            # Use regular connection for non-secure requests
+            logger.info(f"Requesting file '{filename}' from {host}:{port}")
+
+            # Create a socket connection
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((host, int(port)))
+
+            # Send file request
+            request_msg = f"REQUEST_FILE:{filename}"
+            sock.sendall(request_msg.encode('utf-8'))
+
+            # Process the response in a separate thread to avoid blocking
+            def receive_file():
+                try:
+                    # Create buffer reader
+                    import io
+                    reader = sock.makefile('rb')
+
+                    # Read initial response
+                    header = reader.readline().decode('utf-8').strip()
+
+                    if header.startswith("ERR"):
+                        logger.error(f"Error from peer: {header}")
+                        print(f"Error from peer: {header}")
+                        sock.close()
+                        return
+
+                    # Parse file header (expected format: "FILE_DATA:filename:filesize:filehash:")
+                    if not header.startswith("FILE_DATA:"):
+                        logger.error(f"Unexpected response: {header}")
+                        print(f"Unexpected response: {header}")
+                        sock.close()
+                        return
+
+                    # Parse header parts
+                    parts = header.split(":")
+                    if len(parts) < 3:
+                        logger.error(f"Invalid file header: {header}")
+                        sock.close()
+                        return
+
+                    filename = parts[1]
+                    try:
+                        filesize = int(parts[2])
+                    except ValueError:
+                        logger.error(f"Invalid file size: {parts[2]}")
+                        sock.close()
+                        return
+
+                    # Extract hash if present
+                    filehash = None
+                    if len(parts) > 3:
+                        filehash = parts[3]
+
+                    print(f"Receiving file: {filename} ({filesize} bytes)")
+
+                    # Create directory for downloads if it doesn't exist
+                    save_dir = Path.home() / '.p2p-share' / 'shared'
+                    save_dir.mkdir(parents=True, exist_ok=True)
+
+                    save_path = save_dir / filename
+                    with open(save_path, 'wb') as f:
+                        bytes_received = 0
+                        buffer_size = 4096
+
+                        while bytes_received < filesize:
+                            chunk = sock.recv(
+                                min(buffer_size, filesize - bytes_received))
+                            if not chunk:
+                                break
+
+                            f.write(chunk)
+                            bytes_received += len(chunk)
+
+                            # Display progress
+                            percent = (bytes_received / filesize) * 100
+                            if bytes_received % (buffer_size * 10) == 0 or bytes_received == filesize:
+                                print(f"Receiving: {percent:.1f}%", end="\r")
+
+                        print()  # New line after progress
+
+                    # Verify file hash if available
+                    if hash_manager is not None and filehash:
+                        print("Verifying file integrity...")
+                        if hash_manager.verify_file_hash(save_path, filehash):
+                            print("✅ File integrity verified successfully")
+
+                            # Store hash information
+                            hash_manager.add_file_hash(
+                                filename, save_path, f"{host}:{port}")
+                        else:
+                            print("⚠️ File verification failed!")
+
+                            # Ask if user wants to keep the file
+                            print("Keep potentially corrupted file? (y/n): ", end="")
+                            keep_file = input().lower()
+                            if keep_file != 'y':
+                                os.remove(save_path)
+                                print("File deleted")
+                                sock.close()
+                                return
+
+                    print(f"File downloaded successfully to {save_path}")
+
+                    # Add to shared files list if not already there
+                    if str(save_path) not in shared_files:
+                        shared_files.append(str(save_path))
+
+                except Exception as e:
+                    logger.error(f"Error receiving file: {e}")
+                    print(f"Error receiving file: {e}")
+                finally:
+                    sock.close()
+
+            # Start file reception in background thread
+            import threading
+            file_thread = threading.Thread(target=receive_file)
+            file_thread.daemon = True
+            file_thread.start()
+
+            return True
+
+    except Exception as e:
+        logger.error(f"Error requesting file: {e}")
+        print(f"Error requesting file: {e}")
+        return False
