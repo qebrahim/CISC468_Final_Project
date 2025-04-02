@@ -67,7 +67,7 @@ class P2PApplication:
             while self.running:
                 # Process any pending authentication requests
                 process_pending_verifications()
-                
+
                 # Wait for at least one connection before showing menu
                 if not self.connected_peers:
                     self.connection_event.wait(5)  # Check every 5 seconds
@@ -149,16 +149,18 @@ class P2PApplication:
 
                     # Extract host and port from peer_addr
                     host, port = peer_addr.split(':')
-                    
+
                     # Ask if they want to use encryption
                     use_secure = False
-                    
+
                     # Only offer secure transfer if peer is authenticated
                     from crypto import auth_protocol
                     if hasattr(auth_protocol, 'contact_manager') and auth_protocol.contact_manager:
-                        contact = auth_protocol.contact_manager.get_contact_by_address(peer_addr)
+                        contact = auth_protocol.contact_manager.get_contact_by_address(
+                            peer_addr)
                         if contact:
-                            secure_option = input("Use encrypted transfer? (y/n): ").lower()
+                            secure_option = input(
+                                "Use encrypted transfer? (y/n): ").lower()
                             use_secure = secure_option.startswith('y')
 
                     # Request the file
@@ -169,10 +171,13 @@ class P2PApplication:
                     if success:
                         print(f"File '{filename}' transfer initiated")
                         if use_secure:
-                            print("The file will be transferred securely in the background.")
-                            print("You will be notified when the transfer is complete.")
+                            print(
+                                "The file will be transferred securely in the background.")
+                            print(
+                                "You will be notified when the transfer is complete.")
                     else:
-                        print(f"Failed to initiate file transfer for '{filename}'")
+                        print(
+                            f"Failed to initiate file transfer for '{filename}'")
                 else:
                     print("Invalid peer selection")
 
@@ -210,57 +215,59 @@ class P2PApplication:
                         print(f"{i+1}. {file_path.name} ({file_size} bytes)")
                 else:
                     print("No files are currently being shared")
-                    
+
             elif choice == "5":
                 # Authenticate a peer
                 if not self.connected_peers:
                     print("No peers connected")
                     return
-                    
+
                 # List connected peers
                 print("\nSelect a peer to authenticate:")
                 for i, peer in enumerate(self.connected_peers):
                     display_name = self._get_peer_display_name(peer)
                     print(f"{i+1}. {display_name}")
-                    
+
                 peer_idx = int(input("Enter peer number: ")) - 1
                 if 0 <= peer_idx < len(self.connected_peers):
                     peer_addr = list(self.connected_peers)[peer_idx]
-                    
+
                     print(f"Initiating authentication with {peer_addr}...")
-                    
+
                     # Initiate authentication
                     from crypto import auth_protocol
                     success = auth_protocol.initiate_authentication(peer_addr)
-                    
+
                     if success:
-                        print("Authentication process started. Follow the prompts to verify the peer.")
+                        print(
+                            "Authentication process started. Follow the prompts to verify the peer.")
                     else:
                         print("Failed to start authentication process.")
                 else:
                     print("Invalid peer selection")
-                    
+
             elif choice == "6":
                 # List trusted contacts
                 try:
                     from crypto import auth_protocol
                     if hasattr(auth_protocol, 'contact_manager') and auth_protocol.contact_manager:
                         contacts = auth_protocol.contact_manager.get_all_trusted_contacts()
-                        
+
                         if contacts:
                             print("\nTrusted contacts:")
                             for i, (peer_id, contact) in enumerate(contacts.items(), 1):
                                 nickname = contact.get('nickname', 'Unknown')
                                 address = contact.get('address', 'Unknown')
                                 last_seen = contact.get('last_seen', 0)
-                                
+
                                 # Format last seen time
                                 if last_seen > 0:
                                     from datetime import datetime
-                                    last_seen_str = datetime.fromtimestamp(last_seen).strftime('%Y-%m-%d %H:%M:%S')
+                                    last_seen_str = datetime.fromtimestamp(
+                                        last_seen).strftime('%Y-%m-%d %H:%M:%S')
                                 else:
                                     last_seen_str = 'Never'
-                                    
+
                                 print(f"{i}. {nickname} ({peer_id})")
                                 print(f"   Address: {address}")
                                 print(f"   Last seen: {last_seen_str}")
@@ -272,62 +279,66 @@ class P2PApplication:
                 except Exception as e:
                     logger.error(f"Error listing trusted contacts: {e}")
                     print("Error listing trusted contacts.")
-                    
+
             elif choice == "7":
                 # Establish secure channel with a peer
                 if not self.connected_peers:
                     print("No peers connected")
                     return
-                
+
                 # Only allowed with authenticated peers
                 from crypto import auth_protocol
                 if not hasattr(auth_protocol, 'contact_manager') or not auth_protocol.contact_manager:
                     print("Authentication system not initialized.")
                     return
-                    
+
                 # List authenticated peers
                 authenticated_peers = []
-                
+
                 for peer_addr in self.connected_peers:
-                    contact = auth_protocol.contact_manager.get_contact_by_address(peer_addr)
+                    contact = auth_protocol.contact_manager.get_contact_by_address(
+                        peer_addr)
                     if contact:
                         authenticated_peers.append((peer_addr, contact))
-                
+
                 if not authenticated_peers:
                     print("No authenticated peers available.")
-                    print("You need to authenticate peers before establishing secure channels.")
+                    print(
+                        "You need to authenticate peers before establishing secure channels.")
                     return
-                
+
                 print("\nSelect a peer to establish a secure encrypted channel:")
                 for i, (peer_addr, contact) in enumerate(authenticated_peers):
                     nickname = contact.get('nickname', 'Unknown')
                     peer_id = contact.get('peer_id', 'Unknown')
                     print(f"{i+1}. {nickname} ({peer_id}) - {peer_addr}")
-                
+
                 peer_idx = int(input("Enter peer number: ")) - 1
                 if 0 <= peer_idx < len(authenticated_peers):
                     peer_addr = authenticated_peers[peer_idx][0]
                     peer_id = authenticated_peers[peer_idx][1]['peer_id']
-                    
+
                     print(f"Establishing secure channel with {peer_id}...")
-                    
+
                     # Extract host and port
                     host, port = peer_addr.split(':')
-                    
+
                     # Check if channel already exists
                     from crypto.secure_channel import get_secure_channel
                     existing_channel = get_secure_channel(peer_id)
-                    
+
                     if existing_channel and existing_channel.established:
-                        print(f"Secure channel with {peer_id} is already established.")
+                        print(
+                            f"Secure channel with {peer_id} is already established.")
                         return
-                    
+
                     # Establish secure channel
                     from crypto.secure_channel import establish_secure_channel
                     result = establish_secure_channel(peer_id, peer_addr)
-                    
+
                     if result["status"] == "initiated":
-                        print("Secure channel initiated. The channel will be established in the background.")
+                        print(
+                            "Secure channel initiated. The channel will be established in the background.")
                     else:
                         print("Failed to initiate secure channel.")
                 else:
@@ -343,13 +354,14 @@ class P2PApplication:
     def _generate_peer_id(self):
         import uuid
         return str(uuid.uuid4())[:8]
-        
+
     def _get_peer_display_name(self, peer_addr):
         """Get a display name for a peer, showing their authenticated identity if available"""
         try:
             from crypto import auth_protocol
             if hasattr(auth_protocol, 'contact_manager') and auth_protocol.contact_manager:
-                contact = auth_protocol.contact_manager.get_contact_by_address(peer_addr)
+                contact = auth_protocol.contact_manager.get_contact_by_address(
+                    peer_addr)
                 if contact:
                     nickname = contact.get('nickname')
                     peer_id = contact.get('peer_id')
@@ -358,7 +370,7 @@ class P2PApplication:
                     return f"{peer_id} - {peer_addr}"
         except Exception as e:
             logger.error(f"Error getting peer display name: {e}")
-            
+
         return peer_addr
 
     def _setup_keys(self):
