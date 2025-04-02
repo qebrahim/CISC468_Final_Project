@@ -492,9 +492,19 @@ func ProcessVerificationResponse(peerID string, trusted bool) bool {
 	}
 }
 
-// CheckPeerAuthenticated checks if a peer is authenticated
 func CheckPeerAuthenticated(peerAddr string) bool {
-	_, found := contactManager.GetContactByAddress(peerAddr)
+	if contactManager == nil {
+		return false
+	}
+
+	// Extract host and use standard port for lookup
+	parts := strings.Split(peerAddr, ":")
+	if len(parts) < 2 {
+		return false
+	}
+
+	standardAddr := fmt.Sprintf("%s:12345", parts[0])
+	_, found := contactManager.GetContactByAddress(standardAddr)
 	return found
 }
 
