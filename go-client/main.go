@@ -130,6 +130,7 @@ func setupSecurity(peerID string) {
 	}
 
 	// Initialize authentication protocol
+	// Initialize authentication protocol
 	crypto.InitAuthentication(peerID, contactManager, authentication)
 	fmt.Println("✅ Security system initialized")
 }
@@ -146,6 +147,8 @@ func startServer() {
 		defer listener.Close()
 
 		fmt.Printf("✅ Server listening on port %d\n", serverPort)
+		// Add this to your main.go or where your application starts
+		fmt.Printf("DEBUG: ContactManager initialized with storage path: %s\n", contactManager.StoragePath)
 
 		for {
 			conn, err := listener.Accept()
@@ -518,10 +521,28 @@ func establishSecureChannel(scanner *bufio.Scanner) {
 		return
 	}
 
-	if result["status"] == "initiated" {
+	switch result["status"] {
+	case "established":
+		// Keep the connection open by storing it
+		_, ok := result["channel"].(*crypto.SecureChannel)
+		conn, connOk := result["conn"].(net.Conn)
+		if ok && connOk {
+			// Update the connection in the global connectedPeers map
+			standardAddr := fmt.Sprintf("%s:12345", strings.Split(selectedPeer.Address, ":")[0])
+			connectedPeers[standardAddr] = conn
+
+			fmt.Println("Secure channel successfully established.")
+		} else {
+			fmt.Println("Secure channel established but connection could not be stored.")
+		}
+	case "initiated":
 		fmt.Println("Secure channel initiated. The channel will be established in the background.")
-	} else {
-		fmt.Println("Failed to initiate secure channel.")
+	case "timeout":
+		fmt.Println("Secure channel establishment timed out. Please try again.")
+	case "error":
+		fmt.Printf("Failed to establish secure channel: %v\n", result["message"])
+	default:
+		fmt.Println("Unexpected status during secure channel establishment.")
 	}
 }
 
@@ -1533,6 +1554,7 @@ func requestFileSecure(channel *crypto.SecureChannel, filename string) {
 	err := channel.SendEncrypted("REQUEST_FILE", filename)
 	if err != nil {
 		fmt.Printf("Error sending file request: %v\n", err)
+		// Additional error handling or fallback to regular transfer
 		return
 	}
 

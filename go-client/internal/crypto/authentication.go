@@ -176,7 +176,7 @@ func (pa *PeerAuthentication) SignChallenge(challengeB64 string) (string, error)
 }
 
 // VerifySignature verifies a peer's signature of our challenge
-func (pa *PeerAuthentication) VerifySignature(peerID, challengeID, signatureB64 string) (bool, error) {
+func (pa *PeerAuthentication) VerifySignature(peerID, challengeID, signatureB64 string, publicKeyPEM string) (bool, error) {
 	// Get the challenge
 	challengeData, exists := pa.PendingChallenges[challengeID]
 	if !exists {
@@ -187,43 +187,82 @@ func (pa *PeerAuthentication) VerifySignature(peerID, challengeID, signatureB64 
 		return false, fmt.Errorf("challenge was not created for peer %s", peerID)
 	}
 
-	// Get the peer's public key
-	contact, exists := pa.ContactManager.GetTrustedContact(peerID)
-	if !exists {
-		return false, fmt.Errorf("no public key found for peer %s", peerID)
-	}
+	var block *pem.Block
+	var pubInterface interface{}
+	var err error
 
-	// Load the peer's public key
-	block, _ := pem.Decode([]byte(contact.PublicKey))
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return false, fmt.Errorf("failed to decode PEM block containing public key")
-	}
+	// If a public key PEM is provided directly, use it
+	if publicKeyPEM != "" {
+		block, _ = pem.Decode([]byte(publicKeyPEM))
+		if block == nil || block.Type != "PUBLIC KEY" {
+			return false, fmt.Errorf("failed to decode PEM block containing public key")
+		}
 
-	pubInterface, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return false, fmt.Errorf("failed to parse public key: %v", err)
-	}
+		pubInterface, err = x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return false, fmt.Errorf("failed to parse public key: %v", err)
+		}
 
-	pubKey, ok := pubInterface.(*rsa.PublicKey)
-	if !ok {
-		return false, fmt.Errorf("not an RSA public key")
-	}
+		pubKey, ok := pubInterface.(*rsa.PublicKey)
+		if !ok {
+			return false, fmt.Errorf("not an RSA public key")
+		}
 
-	// Decode the signature
-	signature, err := base64.StdEncoding.DecodeString(signatureB64)
-	if err != nil {
-		return false, fmt.Errorf("error decoding signature: %v", err)
-	}
+		// Decode the signature
+		signature, err := base64.StdEncoding.DecodeString(signatureB64)
+		if err != nil {
+			return false, fmt.Errorf("error decoding signature: %v", err)
+		}
 
-	// Hash the challenge
-	hashed := sha256.Sum256(challengeData.Challenge)
+		// Hash the challenge
+		hashed := sha256.Sum256(challengeData.Challenge)
 
-	// Verify the signature
-	err = rsa.VerifyPSS(pubKey, crypto.SHA256, hashed[:], signature, &rsa.PSSOptions{
-		SaltLength: rsa.PSSSaltLengthAuto,
-	})
-	if err != nil {
-		return false, fmt.Errorf("invalid signature: %v", err)
+		// Verify the signature
+		err = rsa.VerifyPSS(pubKey, crypto.SHA256, hashed[:], signature, &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthAuto,
+		})
+		if err != nil {
+			return false, fmt.Errorf("invalid signature: %v", err)
+		}
+	} else {
+		// Otherwise, try to get the public key from the contact manager
+		contact, exists := pa.ContactManager.GetTrustedContact(peerID)
+		if !exists {
+			return false, fmt.Errorf("no public key found for peer %s", peerID)
+		}
+
+		// Load the peer's public key
+		block, _ = pem.Decode([]byte(contact.PublicKey))
+		if block == nil || block.Type != "PUBLIC KEY" {
+			return false, fmt.Errorf("failed to decode PEM block containing public key")
+		}
+
+		pubInterface, err = x509.ParsePKIXPublicKey(block.Bytes)
+		if err != nil {
+			return false, fmt.Errorf("failed to parse public key: %v", err)
+		}
+
+		pubKey, ok := pubInterface.(*rsa.PublicKey)
+		if !ok {
+			return false, fmt.Errorf("not an RSA public key")
+		}
+
+		// Decode the signature
+		signature, err := base64.StdEncoding.DecodeString(signatureB64)
+		if err != nil {
+			return false, fmt.Errorf("error decoding signature: %v", err)
+		}
+
+		// Hash the challenge
+		hashed := sha256.Sum256(challengeData.Challenge)
+
+		// Verify the signature
+		err = rsa.VerifyPSS(pubKey, crypto.SHA256, hashed[:], signature, &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthAuto,
+		})
+		if err != nil {
+			return false, fmt.Errorf("invalid signature: %v", err)
+		}
 	}
 
 	// Signature is valid

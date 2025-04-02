@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,10 @@ var (
 	pendingMutex         sync.RWMutex
 	pendingVerifications = make(map[string]PendingVerification)
 )
+
+// Global map to store public keys by peer ID
+var peerPublicKeys = make(map[string]string)
+var peerPublicKeysMutex sync.RWMutex
 
 // PendingVerification represents a pending authentication request
 type PendingVerification struct {
@@ -35,6 +41,22 @@ func InitAuthentication(peerID string, cm *ContactManager, auth *PeerAuthenticat
 	SetContactManager(cm)
 
 	fmt.Printf("Authentication protocol initialized for peer %s\n", peerID)
+}
+
+// StorePublicKey stores a peer's public key for later use
+func StorePublicKey(peerID, publicKey string) {
+	peerPublicKeysMutex.Lock()
+	defer peerPublicKeysMutex.Unlock()
+	peerPublicKeys[peerID] = publicKey
+	fmt.Printf("Stored public key for peer %s (length: %d)\n", peerID, len(publicKey))
+}
+
+// GetPublicKey retrieves a peer's public key if available
+func GetPublicKey(peerID string) (string, bool) {
+	peerPublicKeysMutex.RLock()
+	defer peerPublicKeysMutex.RUnlock()
+	key, exists := peerPublicKeys[peerID]
+	return key, exists
 }
 
 // HandleAuthMessage processes authentication protocol messages
@@ -81,6 +103,9 @@ func handleHello(conn net.Conn, addr string, payload string) error {
 	if !ok {
 		return fmt.Errorf("missing public_key in HELLO message")
 	}
+
+	StorePublicKey(peerID, pubkey)
+	fmt.Printf("Stored public key from HELLO message (peer: %s)\n", peerID)
 
 	fmt.Printf("Received HELLO from peer %s\n", peerID)
 	// print pubkey
@@ -196,7 +221,9 @@ func handleResponse(conn net.Conn, addr string, payload string) error {
 		return fmt.Errorf("missing public_key in RESPONSE message")
 	}
 
-	fmt.Printf("Received RESPONSE from peer %s\n", peerID)
+	// Store the public key for later use
+	StorePublicKey(peerID, pubkey)
+	fmt.Printf("Stored public key from RESPONSE message (peer: %s)\n", peerID)
 
 	// Store the peer's public key temporarily for verification
 	hostPort := strings.Split(addr, ":")
@@ -306,31 +333,67 @@ func handleTrust(conn net.Conn, addr string, payload string) error {
 		return fmt.Errorf("missing peer_id in TRUST message")
 	}
 
-	trusted, ok := data["trusted"].(bool)
-	if !ok {
-		return fmt.Errorf("missing trusted in TRUST message")
-	}
+	// Check if this is a trust status update or acknowledgment
+	if trustedVal, ok := data["trusted"].(bool); ok {
+		if trustedVal {
+			fmt.Printf("\nPeer %s has added you as a trusted contact!\n", peerID)
+		} else {
+			fmt.Printf("\nPeer %s has removed you as a trusted contact.\n", peerID)
+		}
 
-	if trusted {
-		fmt.Printf("\nPeer %s now trusts us\n", peerID)
+		// Acknowledge the trust status update
+		response := map[string]interface{}{
+			"peer_id": authentication.PeerID,
+			"status":  "acknowledged",
+		}
+
+		responseJSON, err := json.Marshal(response)
+		if err != nil {
+			return fmt.Errorf("error encoding acknowledgment: %v", err)
+		}
+
+		_, err = conn.Write([]byte(fmt.Sprintf("AUTH:TRUST:%s", responseJSON)))
+		if err != nil {
+			return fmt.Errorf("error sending acknowledgment: %v", err)
+		}
+
+		// If the peer trusts us, we should try to reciprocate
+		if trustedVal {
+			// Parse out host for address
+			hostPort := strings.Split(addr, ":")
+			if len(hostPort) >= 1 {
+				peerAddr := fmt.Sprintf("%s:12345", hostPort[0]) // Use standard port
+
+				// First check if we already have this peer
+				if !contactManager.IsTrusted(peerID) {
+					// We may need the peer's public key
+					for id, verif := range pendingVerifications {
+						if id == peerID {
+							// We have the peer's public key from a verification
+							contactManager.AddTrustedContact(
+								peerID,
+								peerAddr,
+								verif.ContactData.PublicKey,
+								fmt.Sprintf("Peer-%s", peerID[:6]),
+							)
+							fmt.Printf("Automatically added %s to trusted contacts based on their trust signal\n", peerID)
+							break
+						}
+					}
+				} else {
+					// Update last seen time
+					contactManager.UpdateLastSeen(peerID)
+				}
+
+				// Ensure the contact is saved
+				contactManager.SaveContacts()
+			}
+		}
+	} else if status, ok := data["status"].(string); ok {
+		// This is an acknowledgment of our trust message
+		fmt.Printf("Received trust acknowledgment from peer %s: %s\n", peerID, status)
 	} else {
-		fmt.Printf("\nPeer %s no longer trusts us\n", peerID)
-	}
-
-	// Acknowledge the trust status update
-	response := map[string]interface{}{
-		"peer_id": authentication.PeerID,
-		"status":  "acknowledged",
-	}
-
-	responseJSON, err := json.Marshal(response)
-	if err != nil {
-		return fmt.Errorf("error encoding acknowledgment: %v", err)
-	}
-
-	_, err = conn.Write([]byte(fmt.Sprintf("AUTH:TRUST:%s", responseJSON)))
-	if err != nil {
-		return fmt.Errorf("error sending acknowledgment: %v", err)
+		fmt.Printf("Missing trusted or status field in TRUST message from %s\n", peerID)
 	}
 
 	return nil
@@ -393,7 +456,7 @@ func ProcessVerificationResponse(peerID string, trusted bool) bool {
 
 	if trusted {
 		// Verify the signature
-		isValid, err := authentication.VerifySignature(peerID, challengeID, signature)
+		isValid, err := authentication.VerifySignature(peerID, challengeID, signature, contactData.PublicKey)
 
 		if err != nil {
 			fmt.Printf("Error verifying signature: %v\n", err)
@@ -414,13 +477,55 @@ func ProcessVerificationResponse(peerID string, trusted bool) bool {
 		}
 
 		if isValid {
-			// Add to trusted contacts
-			contactManager.AddTrustedContact(
-				peerID,
-				contactData.Address,
-				contactData.PublicKey,
-				"", // Use default nickname
-			)
+			// Add to trusted contacts with detailed logging
+			fmt.Printf("Signature verified. Adding peer %s to trusted contacts\n", peerID)
+			fmt.Printf("Contact address: %s\n", contactData.Address)
+			fmt.Printf("Public key length: %d\n", len(contactData.PublicKey))
+
+			// Make sure we have the contact manager
+			if contactManager == nil {
+				fmt.Printf("ERROR: Contact manager not initialized!\n")
+				delete(pendingVerifications, peerID)
+				return false
+			}
+
+			// Remove any existing entry first
+			if contactManager.Contacts == nil {
+				contactManager.Contacts = make(map[string]TrustedContact)
+			}
+			delete(contactManager.Contacts, peerID)
+
+			// Create new entry with all required fields
+			contactManager.Contacts[peerID] = TrustedContact{
+				PeerID:     peerID,
+				Address:    contactData.Address,
+				PublicKey:  contactData.PublicKey,
+				Nickname:   fmt.Sprintf("Peer-%s", peerID[:6]),
+				VerifiedAt: float64(time.Now().Unix()),
+				LastSeen:   float64(time.Now().Unix()),
+			}
+
+			// Debug - check how many contacts we have now
+			fmt.Printf("Updated contacts, now have %d contacts\n", len(contactManager.Contacts))
+			for id, contact := range contactManager.Contacts {
+				fmt.Printf("- Contact: %s at %s\n", id, contact.Address)
+			}
+
+			// Force save to disk
+			err = contactManager.SaveContacts()
+			if err != nil {
+				fmt.Printf("Error saving contacts: %v\n", err)
+			} else {
+				fmt.Printf("Saved %d contacts to %s\n", len(contactManager.Contacts), contactManager.ContactsFile)
+
+				// Dump the contents of the file to verify it was saved correctly
+				fileData, readErr := os.ReadFile(contactManager.ContactsFile)
+				if readErr == nil {
+					fmt.Printf("File contents: %s\n", string(fileData))
+				} else {
+					fmt.Printf("Error reading contacts file: %v\n", readErr)
+				}
+			}
 
 			// Notify the peer that they are now trusted
 			if conn != nil {
@@ -600,6 +705,7 @@ func handleAuthChallenge(conn net.Conn, peerAddr string, payload string) {
 		return
 	}
 
+	// After successfully parsing the peer ID
 	peerID, ok := data["peer_id"].(string)
 	if !ok {
 		fmt.Printf("Missing peer_id in CHALLENGE message\n")
@@ -619,6 +725,9 @@ func handleAuthChallenge(conn net.Conn, peerAddr string, payload string) {
 	}
 
 	fmt.Printf("Received CHALLENGE from peer %s\n", peerID)
+
+	StorePublicKey(peerID, authentication.GetPublicKeyPEM())
+	fmt.Printf("Stored our public key for peer %s\n", peerID)
 
 	// Sign the challenge
 	signature, err := authentication.SignChallenge(challenge)
@@ -774,12 +883,34 @@ func handleAuthVerify(conn net.Conn, peerAddr string, payload string) {
 	if status == "verified" {
 		fmt.Printf("\nPeer %s has verified your identity and trusts you!\n", peerID)
 
+		// Get the peer address from the connection
+		hostPort := strings.Split(peerAddr, ":")
+		if len(hostPort) >= 1 {
+			standardAddr := fmt.Sprintf("%s:12345", hostPort[0]) // Use standard port
+
+			// Try to get the public key from our global map
+			peerPublicKey, exists := GetPublicKey(peerID)
+
+			if exists {
+				// If we have a public key, update or add the contact now
+				nickname := fmt.Sprintf("Peer-%s", peerID[:6])
+				fmt.Printf("Adding peer %s to trusted contacts on verify\n", peerID)
+
+				// Use direct method for reliability
+				err := ForceWriteContact(peerID, standardAddr, peerPublicKey, nickname)
+				if err != nil {
+					fmt.Printf("Error directly writing contact: %v\n", err)
+				} else {
+					fmt.Printf("Successfully added peer %s to trusted contacts on verify\n", peerID)
+				}
+			}
+		}
+
 		// Update our contact entry if it exists
-		if contactManager.IsTrusted(peerID) {
+		if contactManager != nil && contactManager.IsTrusted(peerID) {
 			contactManager.UpdateLastSeen(peerID)
 			fmt.Printf("Updated trusted contact: %s\n", peerID)
 		}
-
 	} else if status == "rejected" {
 		fmt.Printf("\nPeer %s has rejected the authentication request.\n", peerID)
 
@@ -789,49 +920,180 @@ func handleAuthVerify(conn net.Conn, peerAddr string, payload string) {
 	}
 }
 
+// Now modify your handleAuthTrust function to use this direct method
+
 // handleAuthTrust handles trust status updates
-func handleAuthTrust(conn net.Conn, peerAddr string, payload string) {
+func handleAuthTrust(conn net.Conn, addr string, payload string) error {
 	// Parse the payload
 	var data map[string]interface{}
 	err := json.Unmarshal([]byte(payload), &data)
 	if err != nil {
-		fmt.Printf("Error parsing TRUST message: %v\n", err)
-		return
+		return fmt.Errorf("error parsing TRUST message: %v", err)
 	}
 
 	peerID, ok := data["peer_id"].(string)
 	if !ok {
-		fmt.Printf("Missing peer_id in TRUST message\n")
-		return
+		return fmt.Errorf("missing peer_id in TRUST message")
 	}
 
-	trusted, ok := data["trusted"].(bool)
-	if !ok {
-		fmt.Printf("Missing trusted in TRUST message\n")
-		return
-	}
+	// Check if this is a trust status update or acknowledgment
+	if trustedVal, ok := data["trusted"].(bool); ok {
+		if trustedVal {
+			fmt.Printf("\nPeer %s has added you as a trusted contact!\n", peerID)
+		} else {
+			fmt.Printf("\nPeer %s has removed you as a trusted contact.\n", peerID)
+		}
 
-	if trusted {
-		fmt.Printf("\nPeer %s has added you as a trusted contact!\n", peerID)
+		// Acknowledge the trust status update
+		response := map[string]interface{}{
+			"peer_id": authentication.PeerID,
+			"status":  "acknowledged",
+		}
+
+		responseJSON, err := json.Marshal(response)
+		if err != nil {
+			return fmt.Errorf("error encoding acknowledgment: %v", err)
+		}
+
+		_, err = conn.Write([]byte(fmt.Sprintf("AUTH:TRUST:%s", responseJSON)))
+		if err != nil {
+			return fmt.Errorf("error sending acknowledgment: %v", err)
+		}
+
+		// If the peer trusts us, we should try to reciprocate
+		if trustedVal {
+			// Parse out host for address
+			hostPort := strings.Split(addr, ":")
+			if len(hostPort) >= 1 {
+				peerAddr := fmt.Sprintf("%s:12345", hostPort[0]) // Use standard port
+
+				// First try to get the public key from our global map
+				peerPublicKey, exists := GetPublicKey(peerID)
+
+				if !exists {
+					// If not in our map, try to get it from pending verifications
+					pendingMutex.RLock()
+					for id, verif := range pendingVerifications {
+						if id == peerID {
+							peerPublicKey = verif.ContactData.PublicKey
+							break
+						}
+					}
+					pendingMutex.RUnlock()
+				}
+
+				if peerPublicKey != "" {
+					fmt.Printf("Found public key for peer %s (length: %d)\n", peerID, len(peerPublicKey))
+
+					// Use the direct method to save the contact
+					nickname := fmt.Sprintf("Peer-%s", peerID[:6])
+					err := ForceWriteContact(peerID, peerAddr, peerPublicKey, nickname)
+					if err != nil {
+						fmt.Printf("Error directly writing contact: %v\n", err)
+					} else {
+						fmt.Printf("Successfully added peer %s to trusted contacts via direct write\n", peerID)
+					}
+
+					// Also try the regular method
+					if contactManager != nil {
+						contactManager.AddTrustedContact(
+							peerID,
+							peerAddr,
+							peerPublicKey,
+							nickname,
+						)
+						contactManager.SaveContacts()
+					}
+				} else {
+					fmt.Printf("Warning: No public key found for peer %s\n", peerID)
+
+					// Emergency fallback - request authentication from the peer again
+					fmt.Printf("Attempting to initiate authentication to get the public key...\n")
+					success, err := InitiateAuthentication(peerAddr)
+					if err != nil {
+						fmt.Printf("Failed to initiate authentication: %v\n", err)
+					} else if success {
+						fmt.Printf("Successfully initiated authentication to retrieve public key\n")
+					}
+				}
+			}
+		}
+	} else if status, ok := data["status"].(string); ok {
+		// This is an acknowledgment of our trust message
+		fmt.Printf("Received trust acknowledgment from peer %s: %s\n", peerID, status)
 	} else {
-		fmt.Printf("\nPeer %s has removed you as a trusted contact.\n", peerID)
+		fmt.Printf("Missing trusted or status field in TRUST message from %s\n", peerID)
 	}
 
-	// Acknowledge the trust status update
-	response := map[string]interface{}{
-		"peer_id": authentication.PeerID,
-		"status":  "acknowledged",
-	}
+	return nil
+}
 
-	responseJSON, err := json.Marshal(response)
+// Add this function to your auth_protocol.go file
+
+// ForceWriteContact forcibly writes a contact to the trusted_contacts.json file
+func ForceWriteContact(peerID, address, publicKey, nickname string) error {
+	// Path to the trusted contacts file
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Printf("Error encoding acknowledgment: %v\n", err)
-		return
+		return fmt.Errorf("error getting home directory: %v", err)
 	}
 
-	_, err = conn.Write([]byte(fmt.Sprintf("AUTH:TRUST:%s", responseJSON)))
-	if err != nil {
-		fmt.Printf("Error sending acknowledgment: %v\n", err)
-		return
+	contactsPath := filepath.Join(homeDir, ".p2p-share", "metadata", "trusted_contacts.json")
+	fmt.Printf("Writing contact directly to file: %s\n", contactsPath)
+
+	// Create contacts data structure
+	var contacts map[string]TrustedContact
+
+	// Try to read existing file
+	data, err := os.ReadFile(contactsPath)
+	if err == nil && len(data) > 0 {
+		// File exists, try to parse it
+		err = json.Unmarshal(data, &contacts)
+		if err != nil {
+			// If parsing fails, create a new map
+			fmt.Printf("Error parsing existing contacts file: %v - Creating new map\n", err)
+			contacts = make(map[string]TrustedContact)
+		}
+	} else {
+		// File doesn't exist or is empty
+		contacts = make(map[string]TrustedContact)
 	}
+
+	// Set the contact
+	contacts[peerID] = TrustedContact{
+		PeerID:     peerID,
+		Address:    address,
+		PublicKey:  publicKey,
+		Nickname:   nickname,
+		VerifiedAt: float64(time.Now().Unix()),
+		LastSeen:   float64(time.Now().Unix()),
+	}
+
+	// Print debug info
+	fmt.Printf("About to write %d contacts to file\n", len(contacts))
+	for id, contact := range contacts {
+		fmt.Printf("- Contact: %s at %s\n", id, contact.Address)
+	}
+
+	// Write the file
+	newData, err := json.MarshalIndent(contacts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error serializing contacts: %v", err)
+	}
+
+	// Write to a temporary file first
+	tempPath := contactsPath + ".tmp"
+	err = os.WriteFile(tempPath, newData, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing temporary contacts file: %v", err)
+	}
+
+	// Rename the temporary file to the actual file (atomic operation)
+	err = os.Rename(tempPath, contactsPath)
+	if err != nil {
+		return fmt.Errorf("error renaming contacts file: %v", err)
+	}
+
+	fmt.Printf("Successfully wrote contacts file with %d entries\n", len(contacts))
+	return nil
 }

@@ -61,8 +61,11 @@ func NewContactManager(peerID string) (*ContactManager, error) {
 // LoadContacts loads trusted contacts from storage
 func (cm *ContactManager) LoadContacts() error {
 	// Check if file exists
-	if _, err := os.Stat(cm.ContactsFile); os.IsNotExist(err) {
+	_, err := os.Stat(cm.ContactsFile)
+	if os.IsNotExist(err) {
 		// No contacts file yet, initialize with empty map
+		cm.Contacts = make(map[string]TrustedContact)
+		fmt.Printf("No contacts file found, initializing empty contacts map\n")
 		return cm.SaveContacts()
 	}
 
@@ -72,12 +75,35 @@ func (cm *ContactManager) LoadContacts() error {
 		return fmt.Errorf("error reading contacts file: %v", err)
 	}
 
+	fmt.Printf("Loaded contacts file: %s (size: %d bytes)\n", cm.ContactsFile, len(data))
+
+	// Initialize contacts map if nil
+	if cm.Contacts == nil {
+		cm.Contacts = make(map[string]TrustedContact)
+	}
+
 	// Parse JSON
 	if len(data) > 0 {
-		err = json.Unmarshal(data, &cm.Contacts)
+		// Create a temporary map to hold the contacts
+		tempContacts := make(map[string]TrustedContact)
+		err = json.Unmarshal(data, &tempContacts)
 		if err != nil {
-			return fmt.Errorf("error parsing contacts file: %v", err)
+			// Try as an array for backward compatibility
+			var contactList []TrustedContact
+			err = json.Unmarshal(data, &contactList)
+			if err != nil {
+				return fmt.Errorf("error parsing contacts file: %v", err)
+			}
+
+			// Convert array to map
+			for _, contact := range contactList {
+				tempContacts[contact.PeerID] = contact
+			}
 		}
+
+		// Update the actual contacts map
+		cm.Contacts = tempContacts
+		fmt.Printf("Parsed %d contacts from file\n", len(cm.Contacts))
 	}
 
 	return nil
@@ -85,14 +111,41 @@ func (cm *ContactManager) LoadContacts() error {
 
 // SaveContacts saves trusted contacts to storage
 func (cm *ContactManager) SaveContacts() error {
+	// Ensure directory exists
+	err := os.MkdirAll(filepath.Dir(cm.ContactsFile), 0755)
+	if err != nil {
+		return fmt.Errorf("error creating directory: %v", err)
+	}
+
+	// Debug info
+	fmt.Printf("Saving %d contacts to %s\n", len(cm.Contacts), cm.ContactsFile)
+
+	// Make sure Contacts is initialized
+	if cm.Contacts == nil {
+		cm.Contacts = make(map[string]TrustedContact)
+	}
+
 	data, err := json.MarshalIndent(cm.Contacts, "", "  ")
 	if err != nil {
 		return fmt.Errorf("error serializing contacts: %v", err)
 	}
 
-	err = os.WriteFile(cm.ContactsFile, data, 0644)
+	// Write to a temporary file first
+	tempFile := cm.ContactsFile + ".tmp"
+	err = os.WriteFile(tempFile, data, 0644)
 	if err != nil {
-		return fmt.Errorf("error writing contacts file: %v", err)
+		return fmt.Errorf("error writing temporary contacts file: %v", err)
+	}
+
+	// Rename temp file to actual file (atomic operation)
+	err = os.Rename(tempFile, cm.ContactsFile)
+	if err != nil {
+		return fmt.Errorf("error renaming contacts file: %v", err)
+	}
+
+	// Verify save
+	if fileInfo, err := os.Stat(cm.ContactsFile); err == nil {
+		fmt.Printf("Contacts file saved: %s (size: %d bytes)\n", cm.ContactsFile, fileInfo.Size())
 	}
 
 	return nil
@@ -104,6 +157,15 @@ func (cm *ContactManager) AddTrustedContact(peerID, peerAddress, pubkeyPEM, nick
 		nickname = fmt.Sprintf("Peer-%s", peerID[:6])
 	}
 
+	// Debug
+	fmt.Printf("Adding trusted contact: ID=%s, Address=%s, Nickname=%s\n",
+		peerID, peerAddress, nickname)
+
+	// Ensure Contacts is initialized
+	if cm.Contacts == nil {
+		cm.Contacts = make(map[string]TrustedContact)
+	}
+
 	cm.Contacts[peerID] = TrustedContact{
 		PeerID:     peerID,
 		Address:    peerAddress,
@@ -112,6 +174,9 @@ func (cm *ContactManager) AddTrustedContact(peerID, peerAddress, pubkeyPEM, nick
 		VerifiedAt: float64(time.Now().Unix()),
 		LastSeen:   float64(time.Now().Unix()),
 	}
+
+	// Debug after adding
+	fmt.Printf("Contact added, current contacts: %+v\n", cm.Contacts)
 
 	err := cm.SaveContacts()
 	if err != nil {
@@ -164,10 +229,67 @@ func (cm *ContactManager) UpdateLastSeen(peerID string) bool {
 
 // GetContactByAddress finds a contact by their network address
 func (cm *ContactManager) GetContactByAddress(address string) (TrustedContact, bool) {
+	fmt.Printf("Looking for contact with address: %s\n", address) // Debug line
+	fmt.Printf("Current contacts: %+v\n", cm.Contacts)            // Debug line
+
 	for _, contact := range cm.Contacts {
 		if contact.Address == address {
 			return contact, true
 		}
 	}
 	return TrustedContact{}, false
+}
+
+// Add this helper function
+func directlySaveContact(peerID, address, publicKey string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("error getting home directory: %v", err)
+	}
+
+	storagePath := filepath.Join(homeDir, ".p2p-share", "metadata")
+	err = os.MkdirAll(storagePath, 0755)
+	if err != nil {
+		return fmt.Errorf("error creating metadata directory: %v", err)
+	}
+
+	contactsFile := filepath.Join(storagePath, "trusted_contacts.json")
+
+	// Read existing contacts
+	var contacts map[string]TrustedContact
+	data, err := os.ReadFile(contactsFile)
+	if err != nil || len(data) <= 2 {
+		// File doesn't exist or is empty, create new map
+		contacts = make(map[string]TrustedContact)
+	} else {
+		// Parse existing contacts
+		if err := json.Unmarshal(data, &contacts); err != nil {
+			// If parsing fails, create new map
+			contacts = make(map[string]TrustedContact)
+		}
+	}
+
+	// Add the contact
+	contacts[peerID] = TrustedContact{
+		PeerID:     peerID,
+		Address:    address,
+		PublicKey:  publicKey,
+		Nickname:   fmt.Sprintf("Peer-%s", peerID[:6]),
+		VerifiedAt: float64(time.Now().Unix()),
+		LastSeen:   float64(time.Now().Unix()),
+	}
+
+	// Write back to file
+	newData, err := json.MarshalIndent(contacts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error serializing contacts: %v", err)
+	}
+
+	err = os.WriteFile(contactsFile, newData, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing contacts file: %v", err)
+	}
+
+	fmt.Printf("Directly saved contact %s to file\n", peerID)
+	return nil
 }
