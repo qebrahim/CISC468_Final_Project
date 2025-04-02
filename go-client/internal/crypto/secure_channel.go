@@ -3,7 +3,6 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -214,72 +213,62 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 }
 
 func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interface{}) error {
-	// Add more detailed logging
-	fmt.Printf("Full response data: %+v\n", responseData)
+	// Add mutex lock
+	sc.mutex.Lock()
+	defer sc.mutex.Unlock()
 
-	// Extract peer ID, session ID, and public key
-	_, ok := responseData["peer_id"].(string)
-	if !ok {
-		return fmt.Errorf("missing or invalid peer_id in exchange response: %v", responseData)
-	}
+	// Debug logging
+	fmt.Printf("Handling exchange response with data: %+v\n", responseData)
 
 	sessionID, ok := responseData["session_id"].(string)
 	if !ok {
-		return fmt.Errorf("missing or invalid session_id in exchange response")
+		return fmt.Errorf("missing or invalid session_id in response")
 	}
 
-	// Verify session ID matches
+	// Verify session ID matches what we sent
 	if sessionID != sc.SessionID {
-		return fmt.Errorf("session ID mismatch: expected %s, got %s", sc.SessionID, sessionID)
+		fmt.Printf("Session ID mismatch: expected %s, got %s\n", sc.SessionID, sessionID)
+		return fmt.Errorf("session ID mismatch")
 	}
 
+	// Parse and verify peer's public key
 	peerPublicKeyPEM, ok := responseData["public_key"].(string)
 	if !ok {
-		return fmt.Errorf("missing or invalid public_key in exchange response")
+		return fmt.Errorf("missing or invalid public_key in response")
 	}
 
-	// Debug log with full PEM key
-	fmt.Printf("Full peer public key PEM: %s\n", peerPublicKeyPEM)
+	// Log the keys we're working with
+	fmt.Printf("Our session ID: %s\n", sc.SessionID)
+	fmt.Printf("Peer's public key:\n%s\n", peerPublicKeyPEM)
 
-	// Parse the PEM-encoded public key
 	block, _ := pem.Decode([]byte(peerPublicKeyPEM))
-	if block == nil || block.Type != "PUBLIC KEY" {
-		return fmt.Errorf("failed to decode PEM block containing public key")
+	if block == nil {
+		return fmt.Errorf("failed to decode peer's public key PEM")
 	}
 
-	// Parse the public key
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	peerKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("error parsing public key: %v", err)
+		return fmt.Errorf("failed to parse peer's public key: %v", err)
 	}
 
-	// Specifically handle both ECDSA and ECDH keys
-	switch key := pub.(type) {
-	case *ecdsa.PublicKey:
-		sc.ECDSAPubKey = key
-	case *ecdh.PublicKey:
-		// Convert ECDH to ECDSA if needed
-		// You might need to add conversion logic here
-		return fmt.Errorf("unsupported key type: ECDH")
-	default:
-		return fmt.Errorf("unexpected public key type: %T", pub)
+	// Convert to ECDSA public key
+	ecdsaPubKey, ok := peerKey.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("peer's public key is not an ECDSA key")
 	}
 
-	// Derive shared secret and encryption keys
-	err = sc.DeriveSharedSecret()
-	if err != nil {
-		return fmt.Errorf("error deriving shared secret: %v", err)
+	// Store peer's public key using correct field name
+	sc.ECDSAPubKey = ecdsaPubKey
+
+	// Derive shared secret
+	if err := sc.DeriveSharedSecret(); err != nil {
+		return fmt.Errorf("failed to derive shared secret: %v", err)
 	}
 
-	// Mark the channel as established
+	// Mark channel as established
 	sc.Established = true
+	fmt.Printf("Secure channel established successfully with session ID: %s\n", sc.SessionID)
 
-	// Add to global registry
-	secureChannelMutex.Lock()
-	secureChannels[sc.PeerID] = sc
-	secureChannelMutex.Unlock()
-
-	fmt.Printf("Secure channel established with peer %s\n", sc.PeerID)
 	return nil
 }
 

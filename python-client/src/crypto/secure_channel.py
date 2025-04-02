@@ -145,8 +145,15 @@ class SecureChannel:
             session_id = response_data.get("session_id")
             peer_public_key_pem = response_data.get("public_key")
             
-            if not peer_id or not session_id or not peer_public_key_pem:
-                logger.error("Missing data in exchange response")
+            # Add detailed logging
+            logger.debug(f"Handling exchange response:")
+            logger.debug(f"Peer ID: {peer_id}")
+            logger.debug(f"Session ID: {session_id}")
+            logger.debug(f"Our session ID: {self.session_id}")
+            logger.debug(f"Public key length: {len(peer_public_key_pem) if peer_public_key_pem else 0}")
+            
+            if not all([peer_id, session_id, peer_public_key_pem]):
+                logger.error("Missing required data in exchange response")
                 return False
             
             # Verify session ID matches
@@ -155,13 +162,19 @@ class SecureChannel:
                 return False
             
             # Load peer's public key
-            self.peer_public_key = serialization.load_pem_public_key(
-                peer_public_key_pem.encode('utf-8'),
-                default_backend()
-            )
+            try:
+                self.peer_public_key = serialization.load_pem_public_key(
+                    peer_public_key_pem.encode('utf-8'),
+                    default_backend()
+                )
+            except Exception as e:
+                logger.error(f"Failed to load peer's public key: {e}")
+                return False
             
             # Derive shared secret and encryption keys
-            self._derive_shared_secret()
+            if not self._derive_shared_secret():
+                logger.error("Failed to derive shared secret")
+                return False
             
             # Mark the channel as established
             self.established = True
@@ -174,8 +187,7 @@ class SecureChannel:
             
         except Exception as e:
             logger.error(f"Error handling exchange response: {e}")
-            return False
-    
+        return False
     def _derive_shared_secret(self):
         """Derive shared secret using ECDHE"""
         try:
