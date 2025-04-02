@@ -326,15 +326,22 @@ class SecureChannel:
             # Encrypt the message
             encrypted = self.encrypt_message(plaintext)
             if not encrypted:
+                logger.error(f"Failed to encrypt message of type {message_type}")
                 return False
             
             # Send the encrypted message
-            self.socket.sendall(f"SECURE:DATA:{encrypted}".encode('utf-8'))
+            encrypted_message = f"SECURE:DATA:{encrypted}".encode('utf-8')
+            logger.info(f"Sending encrypted message: Type={message_type}, Length={len(encrypted_message)}")
+            
+            self.socket.sendall(encrypted_message)
             return True
             
         except Exception as e:
             logger.error(f"Error sending encrypted message: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+    
     
     def handle_encrypted_data(self, encrypted_data):
         """Handle an incoming encrypted message"""
@@ -391,94 +398,128 @@ def get_secure_channel(peer_id):
 
 def handle_secure_message(conn, addr, message):
     """Handle secure protocol messages"""
-    parts = message.split(':', 2)
-    if len(parts) < 3:
-        logger.error(f"Invalid secure message format: {message}")
-        return None
+    try:
+        parts = message.split(':', 2)
+        if len(parts) < 3:
+            logger.error(f"Invalid secure message format: {message}")
+            return None
     
-    secure_command = parts[1]
-    payload = parts[2]
-    
-    if secure_command == "EXCHANGE":
-        # Handle key exchange request
-        try:
-            exchange_data = json.loads(payload)
-            peer_id = exchange_data.get("peer_id")
-            
-            # Create a new secure channel as responder
-            channel = create_secure_channel(peer_id, conn, is_initiator=False)
-            
-            # Handle the exchange
-            if channel.handle_key_exchange(exchange_data):
-                return {"status": "secure_channel_established", "peer_id": peer_id}
-            else:
-                return {"status": "exchange_failed"}
-                
-        except Exception as e:
-            logger.error(f"Error handling key exchange: {e}")
-            return {"status": "error", "message": str(e)}
-            
-    elif secure_command == "EXCHANGE_RESPONSE":
-        # Handle key exchange response
-        try:
-            response_data = json.loads(payload)
-            peer_id = response_data.get("peer_id")
-            
-            # Find the channel
-            channel = get_secure_channel(peer_id)
-            if not channel:
-                logger.error(f"No pending secure channel for peer {peer_id}")
-                return {"status": "no_channel"}
-            
-            # Handle the exchange response
-            if channel.handle_exchange_response(response_data):
-                return {"status": "secure_channel_established", "peer_id": peer_id}
-            else:
-                return {"status": "exchange_failed"}
-                
-        except Exception as e:
-            logger.error(f"Error handling exchange response: {e}")
-            return {"status": "error", "message": str(e)}
-            
-    elif secure_command == "DATA":
-        # Handle encrypted data
-        try:
-            # Find the channel based on the socket address
-            peer_addr = f"{addr[0]}:12345"  # Use standard port
-            import auth_protocol
-            contact = auth_protocol.contact_manager.get_contact_by_address(peer_addr)
-            
-            if not contact:
-                logger.error(f"No authenticated contact for {peer_addr}")
-                return {"status": "not_authenticated"}
-            
-            peer_id = contact["peer_id"]
-            channel = get_secure_channel(peer_id)
-            
-            if not channel:
-                logger.error(f"No secure channel established for peer {peer_id}")
-                return {"status": "no_secure_channel"}
-            
-            # Decrypt and handle the data
-            result = channel.handle_encrypted_data(payload)
-            if result:
-                return {
-                    "status": "message_received",
-                    "peer_id": peer_id,
-                    "type": result["type"],
-                    "payload": result["payload"]
-                }
-            else:
-                return {"status": "decryption_failed"}
-                
-        except Exception as e:
-            logger.error(f"Error handling encrypted data: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    else:
-        logger.error(f"Unknown secure command: {secure_command}")
-        return {"status": "unknown_command"}
+        secure_command = parts[1]
+        payload = parts[2]
 
+        # Add more detailed logging
+        logger.info(f"Handling secure message: Command={secure_command}, Payload length={len(payload)}")
+
+        # Unpack address (works for tuples or strings)
+        if isinstance(addr, tuple):
+            host, port = addr[0], addr[1]
+        else:
+            host, port = addr.split(':')
+
+        standardAddr = f"{host}:12345"
+
+        # Try to extract peer ID from the message payload
+        extracted_peer_id = None
+        try:
+            if secure_command in ["EXCHANGE", "EXCHANGE_RESPONSE"]:
+                exchange_data = json.loads(payload)
+                extracted_peer_id = exchange_data.get("peer_id")
+                logger.info(f"Extracted peer ID from payload: {extracted_peer_id}")
+        except Exception as e:
+            logger.error(f"Error extracting peer ID from payload: {e}")
+
+        # Try to find contact by address
+        from crypto import auth_protocol
+        contact = auth_protocol.contact_manager.get_contact_by_address(standardAddr)
+        
+        if not contact:
+            logger.error(f"No authenticated contact for {standardAddr}")
+            
+            # If we extracted a peer ID from the payload, try to use that
+            if extracted_peer_id:
+                logger.info(f"Attempting to use extracted peer ID: {extracted_peer_id}")
+                contact = {"peer_id": extracted_peer_id}
+            else:
+                return {"status": "not_authenticated"}
+        
+        # Prioritize the extracted peer ID
+        peer_id = extracted_peer_id or contact["peer_id"]
+        logger.info(f"Using peer ID: {peer_id}")
+
+        # The rest of the function remains the same as in the original implementation
+        if secure_command == "EXCHANGE":
+            # Handle key exchange request
+            try:
+                exchange_data = json.loads(payload)
+                
+                # Create a new secure channel as responder
+                channel = create_secure_channel(peer_id, conn, is_initiator=False)
+                
+                # Handle the exchange
+                if channel.handle_key_exchange(exchange_data):
+                    return {"status": "secure_channel_established", "peer_id": peer_id}
+                else:
+                    return {"status": "exchange_failed"}
+                    
+            except Exception as e:
+                logger.error(f"Error handling key exchange: {e}")
+                return {"status": "error", "message": str(e)}
+                
+        elif secure_command == "EXCHANGE_RESPONSE":
+            # Handle key exchange response
+            try:
+                response_data = json.loads(payload)
+                
+                # Find the channel
+                channel = get_secure_channel(peer_id)
+                if not channel:
+                    logger.error(f"No pending secure channel for peer {peer_id}")
+                    return {"status": "no_channel"}
+                
+                # Handle the exchange response
+                if channel.handle_exchange_response(response_data):
+                    return {"status": "secure_channel_established", "peer_id": peer_id}
+                else:
+                    return {"status": "exchange_failed"}
+                    
+            except Exception as e:
+                logger.error(f"Error handling exchange response: {e}")
+                return {"status": "error", "message": str(e)}
+                
+        elif secure_command == "DATA":
+            # Handle encrypted data
+            try:
+                channel = get_secure_channel(peer_id)
+                
+                if not channel:
+                    logger.error(f"No secure channel established for peer {peer_id}")
+                    return {"status": "no_secure_channel"}
+                
+                # Decrypt and handle the data
+                result = channel.handle_encrypted_data(payload)
+                if result:
+                    return {
+                        "status": "message_received",
+                        "peer_id": peer_id,
+                        "type": result["type"],
+                        "payload": result["payload"]
+                    }
+                else:
+                    return {"status": "decryption_failed"}
+                    
+            except Exception as e:
+                logger.error(f"Error handling encrypted data: {e}")
+                return {"status": "error", "message": str(e)}
+        
+        else:
+            logger.error(f"Unknown secure command: {secure_command}")
+            return {"status": "unknown_command"}
+
+    except Exception as e:
+        logger.error(f"Comprehensive error in handle_secure_message: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "message": str(e)}
 
 def encrypt_file(input_file, output_file, key):
     """Encrypt a file using AES-GCM"""

@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 import json
 
+
 logger = logging.getLogger(__name__)
 
 # Keep track of all active connections and shared files
@@ -487,7 +488,7 @@ def handle_request(conn, addr):
 
             # Check if this is a secure channel message
             if command == "SECURE":
-                # Handle it using the secure channel protocol
+            # Handle it using the secure channel protocol
                 try:
                     from crypto.secure_channel import handle_secure_message
                     result = handle_secure_message(conn, addr, message)
@@ -498,6 +499,9 @@ def handle_request(conn, addr):
                         type = result.get("type")
                         payload = result.get("payload")
                         peer_id = result.get("peer_id")
+
+                        # Log additional details for debugging
+                        logger.info(f"Received secure message: Type={type}, Peer={peer_id}")
 
                         # Handle the decrypted message based on type
                         if type == "REQUEST_FILE":
@@ -512,6 +516,8 @@ def handle_request(conn, addr):
 
                 except Exception as e:
                     logger.error(f"Error handling secure message: {e}")
+                    import traceback
+                    traceback.print_exc()
 
                 continue
 
@@ -618,10 +624,16 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             from crypto.secure_channel import get_secure_channel
             channel = get_secure_channel(peer_id)
             if channel:
-                channel.send_encrypted("ERROR", "FILE_NOT_FOUND")
+                # Modify to use file-specific error message
+                channel.send_encrypted("ERROR", f"FILE_NOT_FOUND:{filename}")
         else:
             conn.sendall(b"ERR:FILE_NOT_FOUND")
         return
+
+    # Additional logging for secure file requests
+    logger.info(f"Processing {'secure' if secure else 'regular'} file request for {filename}")
+    logger.info(f"Resolved file path: {file_path}")
+    logger.info(f"Peer ID for request: {peer_id}")
 
     # Ask for user consent
     requester = f"{addr[0]}:{addr[1]}" if addr else peer_id
@@ -660,7 +672,7 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             from crypto.secure_channel import get_secure_channel
             channel = get_secure_channel(peer_id)
             if channel:
-                channel.send_encrypted("ERROR", "REQUEST_DENIED")
+                channel.send_encrypted("ERROR", f"REQUEST_DENIED:{filename}")
         else:
             conn.sendall(b"ERR:REQUEST_DENIED")
         return
@@ -679,6 +691,12 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             except Exception as e:
                 logger.warning(f"Error handling file hash: {e}")
                 # Continue without hash if there's an error
+
+        # Logging before sending file
+        logger.info(f"Preparing to send file: {file_path}")
+        logger.info(f"File hash: {file_hash or 'Not available'}")
+        logger.info(f"Secure transfer: {secure}")
+        logger.info(f"Peer ID for transfer: {peer_id}")
 
         # Check if we're using a secure channel
         if secure:
@@ -775,8 +793,10 @@ def send_file_secure(peer_id, file_path, file_hash=None):
             header["hash"] = file_hash
 
         # Send the header
+        logger.info(f"Sending secure file header for {basename}")
+        logger.info(f"Header details: {header}")
+        
         channel.send_encrypted("FILE_HEADER", json.dumps(header))
-        logger.info(f"Sent secure file header for {basename}")
 
         # Then send the file in chunks
         with open(file_path, 'rb') as file:
@@ -814,6 +834,8 @@ def send_file_secure(peer_id, file_path, file_hash=None):
 
     except Exception as e:
         logger.error(f"Error sending file securely: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
