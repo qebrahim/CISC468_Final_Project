@@ -179,7 +179,7 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 	// Extract peer ID, session ID, and public key
 	peerID, ok := responseData["peer_id"].(string)
 	if !ok {
-		return fmt.Errorf("missing or invalid peer_id in exchange response", peerID)
+		return fmt.Errorf("missing or invalid peer_id in exchange response: %s", peerID)
 	}
 
 	sessionID, ok := responseData["session_id"].(string)
