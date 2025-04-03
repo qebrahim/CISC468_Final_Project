@@ -205,7 +205,8 @@ func (km *KeyMigration) NotifyContacts() error {
 
 	// Create notification message
 	migrationTime := float64(time.Now().Unix())
-	message := fmt.Sprintf("KEY_MIGRATION:%s:%f", km.PeerID, migrationTime)
+	// Change this line in NotifyContacts or wherever you create the message
+	message := fmt.Sprintf("KEY_MIGRATION:%s:%d", km.PeerID, int64(migrationTime))
 
 	// Add more detailed logging for debugging
 
