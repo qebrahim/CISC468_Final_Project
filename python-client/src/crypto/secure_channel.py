@@ -285,7 +285,7 @@ class SecureChannel:
             logger.error(f"Error encrypting message: {e}")
             return None
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-GCM"""
+        """Decrypt a message using AES-GCM, compatible with Go's implementation"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
@@ -293,8 +293,6 @@ class SecureChannel:
         try:
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            logger.info(f"Message parts: {parts}")
-            
             if len(parts) != 2:
                 logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
                 return None
@@ -305,85 +303,74 @@ class SecureChannel:
                 logger.error(f"Invalid nonce length: {len(nonce)}, expected 12")
                 return None
                 
-            # Extract ciphertext from second part (contains both ciphertext and tag)
+            # Extract combined ciphertext+tag from second part
             ciphertext_with_tag = base64.b64decode(parts[1])
+            logger.info(f"Combined ciphertext+tag length: {len(ciphertext_with_tag)}")
             
-            # In Go's GCM implementation, the tag is appended to the ciphertext
-            # Standard tag size is 16 bytes in most implementations
-            tag_size = 16
+            # Instead of trying to separate ciphertext and tag, use the Go approach
+            # In Go, the Open function handles the combined data differently than Python
             
-            if len(ciphertext_with_tag) <= tag_size:
-                logger.error(f"Ciphertext too short: {len(ciphertext_with_tag)}")
-                return None
-                
-            # Separate the tag from the ciphertext
-            ciphertext = ciphertext_with_tag[:-tag_size]
-            tag = ciphertext_with_tag[-tag_size:]
+            # Instead of trying to split the tag, use a completely different approach
+            # Create a new GCM cipher and manually decrypt
             
-            logger.info(f"Prepared decryption: nonce={len(nonce)}B, ciphertext={len(ciphertext)}B, tag={len(tag)}B")
+            logger.info("Trying direct decryption with AES-GCM...")
             
-            # WARNING: The authentication data (AAD) might be different between implementations
-            # Try with a simplified AAD that doesn't rely on counter synchronization
-            # Instead of: aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-            aad = f"{self.peer_id}:{self.session_id}".encode('utf-8')
-            logger.info(f"Using simplified AAD: {aad}")
+            # Create AES cipher
+            block = algorithms.AES(self.decryption_key)
             
-            # Create decryptor with the tag
-            decryptor = Cipher(
-                algorithms.AES(self.decryption_key),
-                modes.GCM(nonce, tag),
-                backend=default_backend()
-            ).decryptor()
-            
-            # Add the AAD
-            decryptor.authenticate_additional_data(aad)
-            
+            # Try to work around the different implementations
             try:
-                # Attempt decryption
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                # Using the Cipher interface directly
+                cipher = Cipher(block, modes.GCM(nonce), backend=default_backend())
+                decryptor = cipher.decryptor()
+                
+                # Use empty AAD
+                decryptor.authenticate_additional_data(b"")
+                
+                # Separate the tag (last 16 bytes) from the ciphertext
+                if len(ciphertext_with_tag) <= 16:
+                    logger.error("Ciphertext too short")
+                    return None
+                    
+                tag_size = 16  # Standard GCM tag size
+                ciphertext = ciphertext_with_tag[:-tag_size]
+                tag = ciphertext_with_tag[-tag_size:]
+                
+                logger.info(f"Attempting decryption with tag separated: ciphertext={len(ciphertext)}B, tag={len(tag)}B")
+                
+                # Since we're using GCM, we need to include the tag in the decryption
+                plaintext = decryptor.update(ciphertext) + decryptor.finalize_with_tag(tag)
+                
                 logger.info("Decryption successful!")
-                
-                # Increment counter after successful decryption
                 self.receive_counter += 1
-                
                 return plaintext
+                
             except Exception as e:
-                logger.error(f"Primary decryption failed: {e}")
+                logger.error(f"Direct decryption failed: {e}")
                 
-                # Try various fallbacks
-                fallback_attempts = [
-                    {"aad": b"", "desc": "No AAD"},
-                    {"aad": self.peer_id.encode('utf-8'), "desc": "Peer ID only"},
-                    {"aad": self.session_id.encode('utf-8'), "desc": "Session ID only"}
-                ]
-                
-                for attempt in fallback_attempts:
-                    try:
-                        logger.info(f"Trying fallback: {attempt['desc']}")
-                        
-                        decryptor = Cipher(
-                            algorithms.AES(self.decryption_key),
-                            modes.GCM(nonce, tag),
-                            backend=default_backend()
-                        ).decryptor()
-                        
-                        decryptor.authenticate_additional_data(attempt["aad"])
-                        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                        
-                        logger.info(f"Fallback decryption successful with {attempt['desc']}!")
-                        self.receive_counter += 1
-                        return plaintext
-                    except Exception as fallback_e:
-                        logger.error(f"Fallback {attempt['desc']} failed: {fallback_e}")
-                
-                return None
-                
+                # Let's try a different approach - using a custom wrapper
+                try:
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                    
+                    # Create an AESGCM object
+                    aesgcm = AESGCM(self.decryption_key)
+                    
+                    # Attempt to decrypt with empty AAD
+                    plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, b"")
+                    
+                    logger.info("AESGCM decryption successful!")
+                    self.receive_counter += 1
+                    return plaintext
+                    
+                except Exception as e2:
+                    logger.error(f"AESGCM decryption failed: {e2}")
+                    return None
+                    
         except Exception as e:
             logger.error(f"Error in decrypt_message: {e}")
             import traceback
             traceback.print_exc()
             return None
-    
     def send_encrypted(self, message_type, payload):
         """Send an encrypted message over the secure channel"""
         if not self.established:
