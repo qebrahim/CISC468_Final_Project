@@ -242,9 +242,8 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error deriving shared secret: {e}")
             return False
-    
     def encrypt_message(self, plaintext):
-        """Encrypt a message using AES-CBC instead of GCM"""
+        """Encrypt a message using AES-CBC with compatible PKCS7 padding"""
         if not self.established or not self.encryption_key:
             logger.error("Secure channel not established")
             return None
@@ -253,15 +252,16 @@ class SecureChannel:
             # Generate IV (16 bytes for CBC)
             iv = os.urandom(16)
             
+            # Manual PKCS7 padding
+            block_size = 16  # AES block size
+            padding_length = block_size - (len(plaintext) % block_size)
+            if padding_length == 0:
+                padding_length = block_size
+                
+            padding = bytes([padding_length]) * padding_length
+            padded_data = plaintext + padding
+            
             # Create AES-CBC cipher
-            from cryptography.hazmat.primitives.padding import PKCS7
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            
-            # Add PKCS7 padding
-            padder = PKCS7(algorithms.AES.block_size).padder()
-            padded_data = padder.update(plaintext) + padder.finalize()
-            
-            # Encrypt with AES-CBC
             encryptor = Cipher(
                 algorithms.AES(self.encryption_key),
                 modes.CBC(iv),
@@ -284,9 +284,9 @@ class SecureChannel:
             import traceback
             traceback.print_exc()
             return None
-
+        
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-CBC instead of GCM"""
+        """Decrypt a message using AES-CBC with compatible PKCS7 padding"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
@@ -308,10 +308,6 @@ class SecureChannel:
             ciphertext = base64.b64decode(parts[1])
             
             # Create AES-CBC cipher
-            from cryptography.hazmat.primitives.padding import PKCS7
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            
-            # Decrypt with AES-CBC
             decryptor = Cipher(
                 algorithms.AES(self.decryption_key),
                 modes.CBC(iv),
@@ -320,9 +316,20 @@ class SecureChannel:
             
             padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
             
-            # Remove PKCS7 padding
-            unpadder = PKCS7(algorithms.AES.block_size).unpadder()
-            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
+            # Manual PKCS7 unpadding to be compatible with Go
+            padding_length = padded_plaintext[-1]
+            if padding_length > 16:  # AES block size is 16 bytes
+                logger.error(f"Invalid padding length: {padding_length}")
+                return None
+                
+            # Verify all padding bytes are the same
+            for i in range(1, padding_length + 1):
+                if padded_plaintext[-i] != padding_length:
+                    logger.error(f"Invalid padding at position {-i}: expected {padding_length}, got {padded_plaintext[-i]}")
+                    return None
+                    
+            # Remove padding
+            plaintext = padded_plaintext[:-padding_length]
             
             # Increment counter
             self.receive_counter += 1
@@ -334,6 +341,7 @@ class SecureChannel:
             import traceback
             traceback.print_exc()
             return None
+        
     def send_encrypted(self, message_type, payload):
         """Send an encrypted message over the secure channel"""
         if not self.established:
