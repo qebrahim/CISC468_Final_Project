@@ -7,6 +7,7 @@ import os.path
 from pathlib import Path
 import time
 import json
+from network.offline_retrieval import handle_offline_file_request, request_file_from_alternative
 
 
 logger = logging.getLogger(__name__)
@@ -592,6 +593,18 @@ def handle_request(conn, addr):
                 except Exception as e:
                     logger.error(f"Error handling secure channel request: {e}")
                     conn.sendall(b"ERR:INTERNAL_ERROR")
+            elif command == "OFFLINE_FILE_REQUEST":
+                # Handle offline file request
+                if len(parts) > 1:
+                    handle_offline_file_request(
+                        conn, 
+                        addr, 
+                        parts[1], 
+                        authentication.peer_id if authentication else "unknown",
+                        hash_manager
+                    )
+                else:
+                    conn.sendall(b"ERR:INVALID_REQUEST")
             else:
                 logger.error(f"Unknown command: {command}")
                 conn.sendall(b"ERR:UNKNOWN_COMMAND")
@@ -1137,7 +1150,37 @@ def request_file(host, port, filename, use_secure=False):
             file_thread.start()
 
             return True
-
+    except ConnectionRefusedError:
+        print(f"Could not connect to peer {host}:{port}")
+        print("Attempting to find alternative sources...")
+        
+        # Try to get hash information if available
+        file_hash = None
+        if hash_manager is not None:
+            hash_info = hash_manager.get_file_hash(filename)
+            if hash_info:
+                file_hash = hash_info.get('hash')
+                print(f"Using hash {file_hash} for verification")
+        
+        # Get our peer ID from authentication system
+        requester_id = authentication.peer_id if authentication else "unknown"
+        
+        # Try to find the file from alternative peers
+        from crypto import auth_protocol
+        success, alternative_peer, error_msg = request_file_from_alternative(
+            filename,
+            "unknown",  # We don't know the original peer ID if connection failed
+            requester_id,
+            file_hash,
+            auth_protocol.contact_manager
+        )
+        
+        if success:
+            print(f"Successfully retrieved file from alternative peer: {alternative_peer}")
+            return True
+        else:
+            print(f"Failed to find alternative source for file: {error_msg}")
+            return False
     except Exception as e:
         logger.error(f"Error requesting file: {e}")
         print(f"Error requesting file: {e}")
