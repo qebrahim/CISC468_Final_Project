@@ -498,11 +498,24 @@ def handle_secure_message(conn, addr, message):
                 logger.error(f"Error handling exchange response: {e}")
                 return {"status": "error", "message": str(e)}
                 
+        # In secure_channel.py, modify the DATA command handling section
+
         elif secure_command == "DATA":
             # Handle encrypted data
             try:
-                channel = get_secure_channel(peer_id)
-                
+                # First try to find the channel using the connection object
+                channel = None
+                for existing_peer_id, existing_channel in secure_channels.items():
+                    if existing_channel.socket == conn:
+                        channel = existing_channel
+                        peer_id = existing_peer_id
+                        logger.info(f"Found secure channel for connection from {addr} with peer ID: {peer_id}")
+                        break
+                        
+                # If we couldn't find it by connection, try with the peer_id we already determined
+                if not channel and peer_id:
+                    channel = get_secure_channel(peer_id)
+                    
                 if not channel:
                     logger.error(f"No secure channel established for peer {peer_id}")
                     return {"status": "no_secure_channel"}
@@ -512,7 +525,7 @@ def handle_secure_message(conn, addr, message):
                 if result:
                     return {
                         "status": "message_received",
-                        "peer_id": peer_id,
+                        "peer_id": channel.peer_id,  # Use the peer ID from the channel
                         "type": result["type"],
                         "payload": result["payload"]
                     }
@@ -521,18 +534,18 @@ def handle_secure_message(conn, addr, message):
                     
             except Exception as e:
                 logger.error(f"Error handling encrypted data: {e}")
+                import traceback
+                traceback.print_exc()
                 return {"status": "error", "message": str(e)}
-        
         else:
             logger.error(f"Unknown secure command: {secure_command}")
             return {"status": "unknown_command"}
-
     except Exception as e:
-        logger.error(f"Comprehensive error in handle_secure_message: {e}")
+        logger.error(f"Error handling secure message: {e}")
         import traceback
         traceback.print_exc()
         return {"status": "error", "message": str(e)}
-
+    
 def encrypt_file(input_file, output_file, key):
     """Encrypt a file using AES-GCM"""
     try:

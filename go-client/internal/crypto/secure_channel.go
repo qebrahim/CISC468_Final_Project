@@ -413,7 +413,7 @@ func (sc *SecureChannel) SendEncrypted(messageType, payload string) error {
 	if !sc.Established {
 		return fmt.Errorf("cannot send encrypted message - channel not established")
 	}
-
+	fmt.Printf("Sending encrypted message with peer ID: %s\n", sc.PeerID)
 	// Construct the plaintext message
 	plaintext := []byte(fmt.Sprintf("%s:%s", messageType, payload))
 

@@ -1318,12 +1318,19 @@ func requestFileFromPeer(host string, port int, filename string, useSecure bool)
 							response := string(buffer[:n])
 							if response == "ESTABLISH_SECURE:ACCEPTED" {
 								// Establish secure channel
+								// In main.go, look for this code in the requestFileFromPeer function
 								result, err := crypto.EstablishSecureChannel(contact.PeerID, standardAddr)
-								if err != nil || result["status"] != "initiated" {
+								if err != nil {
 									fmt.Printf("Error establishing secure channel: %v\n", err)
 									fmt.Println("Falling back to regular connection")
 									useSecure = false
+								} else if result["status"] != "established" {
+									// Only check the status if there's no error
+									fmt.Printf("Failed to establish secure channel: %v\n", result["status"])
+									fmt.Println("Falling back to regular connection")
+									useSecure = false
 								} else {
+									// Only wait for channel if there's no error and status is "established"
 									// Wait for channel to be established
 									time.Sleep(1 * time.Second)
 									secureChannel = crypto.GetSecureChannel(contact.PeerID)
