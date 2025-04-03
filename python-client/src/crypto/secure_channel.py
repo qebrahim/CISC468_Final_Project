@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 
 BLOCK_SIZE = 16  # AES block size
 
@@ -197,35 +197,56 @@ class SecureChannel:
         """Derive shared secret using ECDHE"""
         try:
             # Compute shared secret
-            shared_secret = self._private_key.exchange(
+            shared_secret = self.private_key.exchange(
                 ec.ECDH(),
-                self._peer_public_key
+                self.peer_public_key
             )
             
-            # Derive keys based on initiator/responder role
+            # Use HKDF to derive two separate keys for each direction
+            # We use different info values to derive different keys for each direction
             if self.is_initiator:
                 # Initiator uses first key for sending, second for receiving
-                self.encryption_key = self._derive_key(shared_secret, b"initiator_to_responder")
-                self.decryption_key = self._derive_key(shared_secret, b"responder_to_initiator")
+                self.encryption_key = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,  # 256 bits for AES-256
+                    salt=None,
+                    info=b"initiator_to_responder"
+                ).derive(shared_secret)
+                
+                self.decryption_key = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=None,
+                    info=b"responder_to_initiator"
+                ).derive(shared_secret)
             else:
                 # Responder uses first key for receiving, second for sending
-                self.decryption_key = self._derive_key(shared_secret, b"initiator_to_responder")
-                self.encryption_key = self._derive_key(shared_secret, b"responder_to_initiator")
+                self.decryption_key = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=None,
+                    info=b"initiator_to_responder"
+                ).derive(shared_secret)
+                
+                self.encryption_key = HKDF(
+                    algorithm=hashes.SHA256(),
+                    length=32,
+                    salt=None,
+                    info=b"responder_to_initiator"
+                ).derive(shared_secret)
+            
+            logger.debug("Derived encryption and decryption keys")
+            
+            # Clear the private key for forward secrecy
+            # Once we've derived the shared secret, we don't need the private key anymore
+            # This ensures forward secrecy even if the device is compromised later
+            self.private_key = None
             
             return True
+            
         except Exception as e:
             logger.error(f"Error deriving shared secret: {e}")
             return False
-    def _derive_key(self, shared_secret, info):
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=None,
-            info=info,
-            backend=default_backend()
-        )
-        return hkdf.derive(shared_secret)
-
     
     def encrypt_message(self, plaintext):
         """Encrypt a message using AES-CBC with enhanced compatibility with Go"""
@@ -234,27 +255,45 @@ class SecureChannel:
             return None
         
         try:
-            # Create AESGCM cipher
-            aesgcm = AESGCM(self.encryption_key)
+            # Generate IV (16 bytes for CBC)
+            iv = os.urandom(16)
+            logger.debug(f"Generated IV (hex): {iv.hex()}")
             
-            # Convert to bytes if it's a string
-            if isinstance(plaintext, str):
-                plaintext = plaintext.encode('utf-8')
+            # Manual PKCS7 padding
+            block_size = 16  # AES block size
+            padding_length = block_size - (len(plaintext) % block_size)
+            if padding_length == 0:
+                padding_length = block_size
+                
+            padding = bytes([padding_length]) * padding_length
+            padded_data = plaintext + padding
             
-            # Generate nonce
-            nonce = os.urandom(12)
+            logger.debug(f"Plaintext length: {len(plaintext)}, Padding length: {padding_length}")
+            logger.debug(f"Padding bytes: {padding.hex()}")
             
-            # Encrypt
-            ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+            # Create AES-CBC cipher
+            encryptor = Cipher(
+                algorithms.AES(self.encryption_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            ).encryptor()
             
-            # Combine nonce and ciphertext
-            combined = nonce + ciphertext
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
             
-            # Return base64 encoded
-            return base64.b64encode(combined).decode('utf-8')
-        
+            # Increment counter
+            self.send_counter += 1
+            
+            # Format: base64(iv) + ":" + base64(ciphertext)
+            encrypted_message = base64.b64encode(iv).decode('utf-8') + ":" + \
+                            base64.b64encode(ciphertext).decode('utf-8')
+            
+            logger.debug(f"Encrypted message format: {encrypted_message[:50]}...")
+            return encrypted_message
+            
         except Exception as e:
-            logger.error(f"Encryption error: {e}")
+            logger.error(f"Error encrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
         
     def decrypt_message(self, encrypted_message):
@@ -264,21 +303,51 @@ class SecureChannel:
             return None
         
         try:
-            # Decode base64
-            combined = base64.b64decode(encrypted_message)
+            # Parse the encrypted message
+            parts = encrypted_message.split(":")
+            if len(parts) != 2:
+                logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
+                return None
+                
+            # Extract IV and ciphertext
+            iv = base64.b64decode(parts[0])
+            ciphertext = base64.b64decode(parts[1])
             
-            # Create AESGCM cipher
-            aesgcm = AESGCM(self.decryption_key)
+            logger.debug(f"IV length: {len(iv)}, Ciphertext length: {len(ciphertext)}")
             
-            # Split nonce and ciphertext
-            nonce = combined[:12]
-            ciphertext = combined[12:]
+            # Create AES-CBC cipher
+            decryptor = Cipher(
+                algorithms.AES(self.decryption_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            ).decryptor()
             
-            # Decrypt
-            return aesgcm.decrypt(nonce, ciphertext, None)
-        
+            # Decrypt the data
+            plaintext_padded = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            # Remove PKCS7 padding
+            padding_length = plaintext_padded[-1]
+            
+            # Validate padding
+            if padding_length == 0 or padding_length > 16:
+                logger.error(f"Invalid padding length: {padding_length}")
+                return None
+                
+            # Verify padding bytes
+            for i in range(1, padding_length + 1):
+                if plaintext_padded[-i] != padding_length:
+                    logger.error("Invalid padding bytes")
+                    return None
+                    
+            plaintext = plaintext_padded[:-padding_length]
+            logger.debug(f"Decrypted length: {len(plaintext)}")
+            
+            return plaintext
+                
         except Exception as e:
-            logger.error(f"Decryption error: {e}")
+            logger.error(f"Error decrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def handle_encrypted_data(self, encrypted_data):

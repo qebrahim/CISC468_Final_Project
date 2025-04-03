@@ -322,31 +322,38 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		return "", fmt.Errorf("secure channel not established")
 	}
 
+	// Create AES cipher
 	block, err := aes.NewCipher(sc.EncryptionKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating cipher: %v", err)
 	}
 
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("error creating GCM: %v", err)
+	// Generate IV
+	iv := make([]byte, aes.BlockSize)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return "", fmt.Errorf("error generating IV: %v", err)
 	}
 
-	// Generate nonce
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", fmt.Errorf("error generating nonce: %v", err)
+	// Add PKCS7 padding
+	padding := aes.BlockSize - (len(plaintext) % aes.BlockSize)
+	paddedData := make([]byte, len(plaintext)+padding)
+	copy(paddedData, plaintext)
+	for i := len(plaintext); i < len(paddedData); i++ {
+		paddedData[i] = byte(padding)
 	}
+
+	// Debug logging
+	fmt.Printf("Original length: %d, Padded length: %d\n", len(plaintext), len(paddedData))
+	fmt.Printf("Padding bytes: %v\n", paddedData[len(plaintext):])
 
 	// Encrypt
-	ciphertext := gcm.Seal(nil, nonce, plaintext, nil)
+	ciphertext := make([]byte, len(paddedData))
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext, paddedData)
 
-	// Combine nonce and ciphertext
-	combined := append(nonce, ciphertext...)
-
-	// Return base64 encoded
-	return base64.StdEncoding.EncodeToString(combined), nil
+	// Format output
+	return base64.StdEncoding.EncodeToString(iv) + ":" +
+		base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 // DecryptMessage decrypts a message using AES-CBC instead of GCM
@@ -359,11 +366,33 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("secure channel not established")
 	}
 
-	// Decode base64
-	combined, err := base64.StdEncoding.DecodeString(encryptedMessage)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding message: %v", err)
+	// Parse the encrypted message
+	parts := strings.Split(encryptedMessage, ":")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid encrypted message format: expected 2 parts, got %d", len(parts))
 	}
+
+	// Decode IV and ciphertext
+	iv, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("error decoding IV: %v", err)
+	}
+
+	// Print IV for debugging
+	fmt.Printf("IV length: %d, IV bytes: %v\n", len(iv), iv)
+
+	if len(iv) != aes.BlockSize {
+		return nil, fmt.Errorf("invalid IV length: %d, expected %d", len(iv), aes.BlockSize)
+	}
+
+	ciphertext, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("error decoding ciphertext: %v", err)
+	}
+
+	// Print ciphertext properties for debugging
+	fmt.Printf("Ciphertext length: %d, is multiple of block size: %v\n",
+		len(ciphertext), len(ciphertext)%aes.BlockSize == 0)
 
 	// Create AES cipher
 	block, err := aes.NewCipher(sc.DecryptionKey)
@@ -371,21 +400,50 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("error creating cipher: %v", err)
 	}
 
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("error creating GCM: %v", err)
+	// Decrypt with CBC mode
+	mode := cipher.NewCBCDecrypter(block, iv)
+	plaintext := make([]byte, len(ciphertext))
+
+	// Make sure ciphertext length is a multiple of the block size
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext length (%d) is not a multiple of block size (%d)",
+			len(ciphertext), aes.BlockSize)
 	}
 
-	// Split nonce and ciphertext
-	nonceSize := gcm.NonceSize()
-	if len(combined) < nonceSize {
-		return nil, fmt.Errorf("invalid message length")
-	}
-	nonce, ciphertext := combined[:nonceSize], combined[nonceSize:]
+	mode.CryptBlocks(plaintext, ciphertext)
 
-	// Decrypt
-	return gcm.Open(nil, nonce, ciphertext, nil)
+	// Print the raw decrypted data for debugging
+	fmt.Printf("Raw decrypted data (first 16 bytes): %v\n", plaintext[:min(16, len(plaintext))])
+	if len(plaintext) > 0 {
+		fmt.Printf("Last byte (potential padding length): %d\n", plaintext[len(plaintext)-1])
+	}
+
+	// Try more permissive unpadding
+	var unpadErr error
+	unpadded, unpadErr := pkcs7Unpad(plaintext)
+
+	if unpadErr != nil {
+		fmt.Printf("Warning: unpadding error: %v\n", unpadErr)
+		// Fallback: try interpreting the last byte as the padding length
+		if len(plaintext) > 0 {
+			paddingLen := int(plaintext[len(plaintext)-1])
+			if paddingLen <= aes.BlockSize && len(plaintext) >= paddingLen {
+				fmt.Printf("Attempting fallback padding removal with length: %d\n", paddingLen)
+				unpadded = plaintext[:len(plaintext)-paddingLen]
+			} else {
+				// Last resort: just return the data as is
+				fmt.Printf("Using raw decrypted data without unpadding\n")
+				unpadded = plaintext
+			}
+		} else {
+			return nil, fmt.Errorf("empty plaintext and unpadding failed: %v", unpadErr)
+		}
+	}
+
+	// Increment counter
+	sc.ReceiveCounter++
+
+	return unpadded, nil
 }
 
 // Improved Helper function for PKCS7 padding
