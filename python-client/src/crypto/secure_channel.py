@@ -280,6 +280,8 @@ class SecureChannel:
             return None
         
         try:
+            logger.error(f"Encrypted message: {encrypted_message}")
+            
             # Parse the encrypted message
             parts = encrypted_message.split(":")
             if len(parts) != 2:
@@ -288,6 +290,7 @@ class SecureChannel:
             
             # The first part is the base64-encoded nonce
             nonce = base64.b64decode(parts[0])
+            logger.debug(f"Nonce (decoded): {nonce.hex()}")
             
             # The second part is the base64-encoded ciphertext+tag
             encrypted_data = base64.b64decode(parts[1])
@@ -296,7 +299,10 @@ class SecureChannel:
             ciphertext = encrypted_data[:-16]
             tag = encrypted_data[-16:]
             
-            # Create a decryptor
+            logger.debug(f"Ciphertext length: {len(ciphertext)}")
+            logger.debug(f"Tag: {tag.hex()}")
+            
+            # Try WITHOUT adding AAD for debugging
             cipher = Cipher(
                 algorithms.AES(self.decryption_key),
                 modes.GCM(nonce, tag),
@@ -304,9 +310,8 @@ class SecureChannel:
             )
             decryptor = cipher.decryptor()
             
-            # Add associated data (AAD) for authentication if your Go code uses it
-            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-            decryptor.authenticate_additional_data(aad)
+            # DO NOT add AAD for testing
+            # decryptor.authenticate_additional_data(aad)
             
             # Decrypt the ciphertext
             plaintext = decryptor.update(ciphertext) + decryptor.finalize()
