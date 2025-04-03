@@ -409,11 +409,13 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 	return plaintext, nil
 }
 
+// In secure_channel.go, update the SendEncrypted method:
+
 func (sc *SecureChannel) SendEncrypted(messageType, payload string) error {
 	if !sc.Established {
 		return fmt.Errorf("cannot send encrypted message - channel not established")
 	}
-	fmt.Printf("Sending encrypted message with peer ID: %s\n", sc.PeerID)
+
 	// Construct the plaintext message
 	plaintext := []byte(fmt.Sprintf("%s:%s", messageType, payload))
 
@@ -423,17 +425,23 @@ func (sc *SecureChannel) SendEncrypted(messageType, payload string) error {
 		return fmt.Errorf("error encrypting message: %v", err)
 	}
 
-	// Additional logging
-	fmt.Printf("Sending encrypted message: Type=%s, Payload=%s, Encrypted=%s\n",
-		messageType, payload, encrypted)
+	// Add detailed logging about the format
+	fmt.Printf("Encrypted message format: %s\n", encrypted)
+	parts := strings.Split(encrypted, ":")
+	fmt.Printf("Number of parts: %d\n", len(parts))
 
 	// Send the encrypted message
-	_, err = sc.Conn.Write([]byte(fmt.Sprintf("SECURE:DATA:%s", encrypted)))
+	encrypted_message := fmt.Sprintf("SECURE:DATA:%s", encrypted)
+	fmt.Printf("Full message being sent: %s\n", encrypted_message)
+
+	_, err = sc.Conn.Write([]byte(encrypted_message))
+	// ...
 	if err != nil {
 		return fmt.Errorf("error sending encrypted message: %v", err)
 	}
 
 	return nil
+
 }
 
 // HandleEncryptedData processes an incoming encrypted message

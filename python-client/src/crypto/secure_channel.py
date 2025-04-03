@@ -292,15 +292,31 @@ class SecureChannel:
             return None
         
         try:
-            # Parse the encrypted message
+            # More flexible parsing - handle possible different formats
             parts = encrypted_message.split(":")
-            if len(parts) != 3:
-                logger.error("Invalid encrypted message format")
-                return None
             
-            nonce = base64.b64decode(parts[0])
-            ciphertext = base64.b64decode(parts[1])
-            tag = base64.b64decode(parts[2])
+            # Debug the parts
+            logger.info(f"Message parts: {parts}")
+            
+            if len(parts) < 2:
+                logger.error("Not enough parts in encrypted message")
+                return None
+                
+            # Try to be forgiving about the format
+            if len(parts) == 2:
+                # If we only have two parts, assume it's nonce:ciphertext+tag
+                nonce = base64.b64decode(parts[0])
+                combined = base64.b64decode(parts[1])
+                # Assume the last 16 bytes are the tag
+                ciphertext = combined[:-16]
+                tag = combined[-16:]
+            elif len(parts) >= 3:
+                # Normal case with three parts
+                nonce = base64.b64decode(parts[0])
+                ciphertext = base64.b64decode(parts[1])
+                tag = base64.b64decode(parts[2])
+            
+        
             
             # Create a decryptor
             decryptor = Cipher(
