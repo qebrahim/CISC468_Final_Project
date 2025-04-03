@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 import json
 from network.offline_retrieval import handle_offline_file_request, request_file_from_alternative
+from crypto.key_migration import handle_key_migration
 
 
 logger = logging.getLogger(__name__)
@@ -605,6 +606,31 @@ def handle_request(conn, addr):
                     )
                 else:
                     conn.sendall(b"ERR:INVALID_REQUEST")
+            elif command == "MIGRATE_KEY":
+                if len(parts) > 1:
+                    payload = parts[1]
+                    # The message might be split due to size, try to get complete message
+                    if not payload.endswith("}"):
+                        # Keep reading until we get a complete JSON
+                        while True:
+                            try:
+                                more_data = conn.recv(4096).decode('utf-8')
+                                if not more_data:
+                                    break
+                                payload += more_data
+                                if payload.endswith("}"):
+                                    break
+                            except Exception as e:
+                                logger.error(f"Error reading full migration message: {e}")
+                                break
+                    
+                    # Now process the key migration with the complete message
+                    handle_key_migration(payload, addr, conn, 
+                                        contact_manager=auth_protocol.contact_manager,
+                                        authentication=auth_protocol.authentication)
+                else:
+                    conn.sendall(b"ERR:INVALID_KEY_MIGRATION")
+
             else:
                 logger.error(f"Unknown command: {command}")
                 conn.sendall(b"ERR:UNKNOWN_COMMAND")
