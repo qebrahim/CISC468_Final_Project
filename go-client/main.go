@@ -52,7 +52,7 @@ func main() {
 
 	// Generate a peer ID (first 8 chars of a UUID)
 	peerID := generatePeerID()
-	fmt.Printf("🔌 Running as peer ID: %s\n", peerID)
+	fmt.Printf(" Running as peer ID: %s\n", peerID)
 
 	// Initialize hash manager
 	var err error

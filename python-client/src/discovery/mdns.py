@@ -23,7 +23,7 @@ class PeerDiscovery:
         try:
             ip_addr = self.get_local_ip()
             print(
-                f"🔵 Advertising service {self.service_name} at {ip_addr}:{self.port}")
+                f" Advertising service {self.service_name} at {ip_addr}:{self.port}")
 
             info = ServiceInfo(
                 "_p2p-share._tcp.local.",

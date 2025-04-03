@@ -17,7 +17,7 @@ type MDNSDiscovery struct {
 func NewMDNSDiscovery(serviceName string) *MDNSDiscovery {
 	resolver, err := zeroconf.NewResolver(nil) // Ensure it listens on all interfaces
 	if err != nil {
-		log.Fatalf("❌ Failed to create resolver: %v", err)
+		log.Fatalf(" Failed to create resolver: %v", err)
 	}
 
 	return &MDNSDiscovery{
@@ -40,10 +40,10 @@ func (d *MDNSDiscovery) DiscoverPeers() ([]string, error) {
 	firstPeerFound := false
 	var firstPeerTime time.Time
 
-	fmt.Println("🔍 Starting mDNS discovery...")
+	fmt.Println(" Starting mDNS discovery...")
 	err := d.resolver.Browse(ctx, d.serviceName, "local.", entries)
 	if err != nil {
-		return nil, fmt.Errorf("❌ Failed to browse: %v", err)
+		return nil, fmt.Errorf(" Failed to browse: %v", err)
 	}
 
 	// Collect results
@@ -73,11 +73,11 @@ func (d *MDNSDiscovery) DiscoverPeers() ([]string, error) {
 		select {
 		case entry, ok := <-entries:
 			if !ok {
-				fmt.Println("🔴 Channel closed")
+				fmt.Println(" Channel closed")
 				return peers, nil
 			}
 
-			fmt.Println("✅ Found service:", entry.Service)
+			fmt.Println(" Found service:", entry.Service)
 			fmt.Println("   ➡ Hostname:", entry.HostName)
 			fmt.Println("   ➡ IPv4:", entry.AddrIPv4)
 			fmt.Println("   ➡ IPv6:", entry.AddrIPv6)
@@ -91,7 +91,7 @@ func (d *MDNSDiscovery) DiscoverPeers() ([]string, error) {
 				if !firstPeerFound {
 					firstPeerFound = true
 					firstPeerTime = time.Now()
-					fmt.Println("🕒 Found first peer, will continue searching briefly...")
+					fmt.Println(" Found first peer, will continue searching briefly...")
 				}
 			}
 
@@ -100,7 +100,7 @@ func (d *MDNSDiscovery) DiscoverPeers() ([]string, error) {
 			return peers, nil
 
 		case <-ctx.Done():
-			fmt.Println("⏳ Discovery timed out")
+			fmt.Println(" Discovery timed out")
 			return peers, nil
 		}
 	}
