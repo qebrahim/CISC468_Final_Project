@@ -1,11 +1,11 @@
 package crypto
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -30,10 +30,11 @@ type SecureChannel struct {
 	IsInitiator    bool
 	Established    bool
 	SessionID      string
-	ECDSAPrivKey   *ecdsa.PrivateKey // Using ECDSA instead of ECDH
-	ECDSAPubKey    *ecdsa.PublicKey  // Using ECDSA instead of ECDH
+	ECDSAPrivKey   *ecdsa.PrivateKey
+	ECDSAPubKey    *ecdsa.PublicKey
 	EncryptionKey  []byte
 	DecryptionKey  []byte
+	MACKey         []byte
 	SendCounter    uint32
 	ReceiveCounter uint32
 	mutex          sync.Mutex
@@ -65,6 +66,37 @@ func NewSecureChannel(peerID string, conn net.Conn, isInitiator bool) (*SecureCh
 	}
 
 	return sc, nil
+}
+
+func (sc *SecureChannel) deriveKeys(sharedSecret []byte) error {
+	// Derive keys using a similar approach to Python implementation
+	derivedKeys := make([]byte, 96) // 3 * 32-byte keys
+	h := hmac.New(sha256.New, sharedSecret)
+
+	// Different info strings for each key
+	infos := [][]byte{
+		[]byte("initiator_to_responder"),
+		[]byte("responder_to_initiator"),
+		[]byte("mac_key"),
+	}
+
+	for i, info := range infos {
+		h.Reset()
+		h.Write(info)
+		copy(derivedKeys[i*32:(i+1)*32], h.Sum(nil)[:32])
+	}
+
+	if sc.IsInitiator {
+		sc.EncryptionKey = derivedKeys[0:32]
+		sc.DecryptionKey = derivedKeys[32:64]
+		sc.MACKey = derivedKeys[64:96]
+	} else {
+		sc.DecryptionKey = derivedKeys[0:32]
+		sc.EncryptionKey = derivedKeys[32:64]
+		sc.MACKey = derivedKeys[64:96]
+	}
+
+	return nil
 }
 
 // InitiateKeyExchange starts the key exchange process
@@ -117,7 +149,7 @@ func (sc *SecureChannel) InitiateKeyExchange() error {
 
 // HandleKeyExchange processes a key exchange message from a peer
 func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) error {
-	// Extract peer ID, session ID, and public key
+	// Step 1: Extract and validate essential data from the exchange message
 	peerID, ok := exchangeData["peer_id"].(string)
 	if !ok {
 		return fmt.Errorf("missing or invalid peer_id in key exchange")
@@ -133,14 +165,10 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 		return fmt.Errorf("missing or invalid public_key in key exchange")
 	}
 
-	// Debug log
-	fmt.Printf("Processing key exchange from peer %s with session %s\n", peerID, sessionID)
-	fmt.Printf("Received peer public key: %s...\n", peerPublicKeyPEM[:60])
-
-	// Store session ID
+	// Step 2: Store the session ID
 	sc.SessionID = sessionID
 
-	// Parse the PEM-encoded public key
+	// Step 3: Decode and parse the peer's public key
 	block, _ := pem.Decode([]byte(peerPublicKeyPEM))
 	if block == nil || block.Type != "PUBLIC KEY" {
 		return fmt.Errorf("failed to decode PEM block containing public key")
@@ -152,17 +180,18 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 		return fmt.Errorf("error parsing public key: %v", err)
 	}
 
+	// Ensure the key is an ECDSA public key
 	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
 	if !ok {
 		return fmt.Errorf("public key is not an ECDSA key")
 	}
 
-	// Store the parsed ECDSA public key
+	// Step 4: Store the parsed ECDSA public key
 	sc.ECDSAPubKey = ecdsaPub
 
-	// If we're the responder, send our public key back
+	// Step 5: If we're the responder, send our public key back
 	if !sc.IsInitiator {
-		// Format our public key as PEM
+		// Generate our public key in PEM format
 		ourPublicKeyBytes, err := x509.MarshalPKIXPublicKey(&sc.ECDSAPrivKey.PublicKey)
 		if err != nil {
 			return fmt.Errorf("error marshaling our public key: %v", err)
@@ -196,16 +225,27 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 		fmt.Printf("Sent key exchange response to peer %s\n", peerID)
 	}
 
-	// Derive shared secret and encryption keys
-	err = sc.DeriveSharedSecret()
+	// Step 6: Compute shared secret
+	// Use scalar multiplication of peer's public key coordinates with our private key
+	sharedSecretX, _ := sc.ECDSAPrivKey.Curve.ScalarMult(
+		sc.ECDSAPubKey.X,
+		sc.ECDSAPubKey.Y,
+		sc.ECDSAPrivKey.D.Bytes(),
+	)
+
+	// Convert shared secret to bytes
+	sharedSecret := sharedSecretX.Bytes()
+
+	// Step 7: Derive encryption keys
+	err = sc.deriveKeys(sharedSecret)
 	if err != nil {
 		return fmt.Errorf("error deriving shared secret: %v", err)
 	}
 
-	// Mark the channel as established
+	// Step 8: Mark the channel as established
 	sc.Established = true
 
-	// Add to global registry
+	// Step 9: Add to global registry
 	secureChannelMutex.Lock()
 	secureChannels[sc.PeerID] = sc
 	secureChannelMutex.Unlock()
@@ -214,14 +254,9 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 	return nil
 }
 
+// HandleExchangeResponse processes the response to a key exchange
 func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interface{}) error {
-	// Add mutex lock
-	sc.mutex.Lock()
-	defer sc.mutex.Unlock()
-
-	// Debug logging
-	fmt.Printf("Handling exchange response with data: %+v\n", responseData)
-
+	// Step 1: Validate session ID
 	sessionID, ok := responseData["session_id"].(string)
 	if !ok {
 		return fmt.Errorf("missing or invalid session_id in response")
@@ -229,46 +264,60 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 
 	// Verify session ID matches what we sent
 	if sessionID != sc.SessionID {
-		fmt.Printf("Session ID mismatch: expected %s, got %s\n", sc.SessionID, sessionID)
-		return fmt.Errorf("session ID mismatch")
+		return fmt.Errorf("session ID mismatch: expected %s, got %s", sc.SessionID, sessionID)
 	}
 
-	// Parse and verify peer's public key
+	// Step 2: Extract peer's public key
 	peerPublicKeyPEM, ok := responseData["public_key"].(string)
 	if !ok {
 		return fmt.Errorf("missing or invalid public_key in response")
 	}
 
-	// Log the keys we're working with
-	fmt.Printf("Our session ID: %s\n", sc.SessionID)
-	fmt.Printf("Peer's public key:\n%s\n", peerPublicKeyPEM)
-
+	// Step 3: Decode and parse the peer's public key
 	block, _ := pem.Decode([]byte(peerPublicKeyPEM))
 	if block == nil {
 		return fmt.Errorf("failed to decode peer's public key PEM")
 	}
 
+	// Parse the public key
 	peerKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		return fmt.Errorf("failed to parse peer's public key: %v", err)
 	}
 
-	// Convert to ECDSA public key
+	// Ensure it's an ECDSA public key
 	ecdsaPubKey, ok := peerKey.(*ecdsa.PublicKey)
 	if !ok {
 		return fmt.Errorf("peer's public key is not an ECDSA key")
 	}
 
-	// Store peer's public key using correct field name
+	// Step 4: Store peer's public key
 	sc.ECDSAPubKey = ecdsaPubKey
 
-	// Derive shared secret
-	if err := sc.DeriveSharedSecret(); err != nil {
+	// Step 5: Compute shared secret
+	sharedSecretX, _ := sc.ECDSAPrivKey.Curve.ScalarMult(
+		sc.ECDSAPubKey.X,
+		sc.ECDSAPubKey.Y,
+		sc.ECDSAPrivKey.D.Bytes(),
+	)
+
+	// Convert shared secret to bytes
+	sharedSecret := sharedSecretX.Bytes()
+
+	// Step 6: Derive encryption keys
+	err = sc.deriveKeys(sharedSecret)
+	if err != nil {
 		return fmt.Errorf("failed to derive shared secret: %v", err)
 	}
 
-	// Mark channel as established
+	// Step 7: Mark channel as established
 	sc.Established = true
+
+	// Step 8: Add to global registry
+	secureChannelMutex.Lock()
+	secureChannels[sc.PeerID] = sc
+	secureChannelMutex.Unlock()
+
 	fmt.Printf("Secure channel established successfully with session ID: %s\n", sc.SessionID)
 
 	return nil
@@ -314,6 +363,7 @@ func deriveKey(secret, info []byte, length int) []byte {
 
 // EncryptMessage encrypts a message using AES-GCM
 // EncryptMessage encrypts a message using AES-CBC instead of GCM
+
 func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -342,22 +392,26 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		paddedData[i] = byte(padding)
 	}
 
-	// Debug logging
-	fmt.Printf("Original length: %d, Padded length: %d\n", len(plaintext), len(paddedData))
-	fmt.Printf("Padding bytes: %v\n", paddedData[len(plaintext):])
-
 	// Encrypt
 	ciphertext := make([]byte, len(paddedData))
 	mode := cipher.NewCBCEncrypter(block, iv)
 	mode.CryptBlocks(ciphertext, paddedData)
 
-	// Format output
-	return base64.StdEncoding.EncodeToString(iv) + ":" +
-		base64.StdEncoding.EncodeToString(ciphertext), nil
+	// Compute HMAC
+	mac := hmac.New(sha256.New, sc.MACKey)
+	mac.Write(iv)
+	mac.Write(ciphertext)
+	macSum := mac.Sum(nil)
+
+	// Format output: base64(iv):base64(ciphertext):base64(mac)
+	return fmt.Sprintf("%s:%s:%s",
+		base64.StdEncoding.EncodeToString(iv),
+		base64.StdEncoding.EncodeToString(ciphertext),
+		base64.StdEncoding.EncodeToString(macSum),
+	), nil
 }
 
-// DecryptMessage decrypts a message using AES-CBC instead of GCM
-// DecryptMessage decrypts a message using AES-CBC with improved error handling
+// Update DecryptMessage to verify HMAC
 func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -368,21 +422,14 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 
 	// Parse the encrypted message
 	parts := strings.Split(encryptedMessage, ":")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid encrypted message format: expected 2 parts, got %d", len(parts))
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid encrypted message format: expected 3 parts, got %d", len(parts))
 	}
 
-	// Decode IV and ciphertext
+	// Decode IV, ciphertext, and MAC
 	iv, err := base64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
 		return nil, fmt.Errorf("error decoding IV: %v", err)
-	}
-
-	// Print IV for debugging
-	fmt.Printf("IV length: %d, IV bytes: %v\n", len(iv), iv)
-
-	if len(iv) != aes.BlockSize {
-		return nil, fmt.Errorf("invalid IV length: %d, expected %d", len(iv), aes.BlockSize)
 	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(parts[1])
@@ -390,9 +437,20 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("error decoding ciphertext: %v", err)
 	}
 
-	// Print ciphertext properties for debugging
-	fmt.Printf("Ciphertext length: %d, is multiple of block size: %v\n",
-		len(ciphertext), len(ciphertext)%aes.BlockSize == 0)
+	receivedMac, err := base64.StdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("error decoding MAC: %v", err)
+	}
+
+	// Verify HMAC
+	mac := hmac.New(sha256.New, sc.MACKey)
+	mac.Write(iv)
+	mac.Write(ciphertext)
+	expectedMac := mac.Sum(nil)
+
+	if !hmac.Equal(receivedMac, expectedMac) {
+		return nil, errors.New("message authentication failed")
+	}
 
 	// Create AES cipher
 	block, err := aes.NewCipher(sc.DecryptionKey)
@@ -403,76 +461,23 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 	// Decrypt with CBC mode
 	mode := cipher.NewCBCDecrypter(block, iv)
 	plaintext := make([]byte, len(ciphertext))
-
-	// Make sure ciphertext length is a multiple of the block size
-	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("ciphertext length (%d) is not a multiple of block size (%d)",
-			len(ciphertext), aes.BlockSize)
-	}
-
 	mode.CryptBlocks(plaintext, ciphertext)
 
-	// Print the raw decrypted data for debugging
-	fmt.Printf("Raw decrypted data (first 16 bytes): %v\n", plaintext[:min(16, len(plaintext))])
-	if len(plaintext) > 0 {
-		fmt.Printf("Last byte (potential padding length): %d\n", plaintext[len(plaintext)-1])
+	// Remove PKCS7 padding
+	paddingLength := int(plaintext[len(plaintext)-1])
+	if paddingLength > len(plaintext) || paddingLength == 0 {
+		return nil, errors.New("invalid padding")
 	}
 
-	// Try more permissive unpadding
-	var unpadErr error
-	unpadded, unpadErr := pkcs7Unpad(plaintext)
-
-	if unpadErr != nil {
-		fmt.Printf("Warning: unpadding error: %v\n", unpadErr)
-		// Fallback: try interpreting the last byte as the padding length
-		if len(plaintext) > 0 {
-			paddingLen := int(plaintext[len(plaintext)-1])
-			if paddingLen <= aes.BlockSize && len(plaintext) >= paddingLen {
-				fmt.Printf("Attempting fallback padding removal with length: %d\n", paddingLen)
-				unpadded = plaintext[:len(plaintext)-paddingLen]
-			} else {
-				// Last resort: just return the data as is
-				fmt.Printf("Using raw decrypted data without unpadding\n")
-				unpadded = plaintext
-			}
-		} else {
-			return nil, fmt.Errorf("empty plaintext and unpadding failed: %v", unpadErr)
+	// Verify padding
+	for i := 1; i <= paddingLength; i++ {
+		if plaintext[len(plaintext)-i] != byte(paddingLength) {
+			return nil, errors.New("invalid padding")
 		}
 	}
 
-	// Increment counter
-	sc.ReceiveCounter++
-
-	return unpadded, nil
-}
-
-// Improved Helper function for PKCS7 padding
-func pkcs7Pad(data []byte, blockSize int) []byte {
-	padding := blockSize - (len(data) % blockSize)
-	if padding == 0 {
-		padding = blockSize
-	}
-	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
-	return append(data, padtext...)
-}
-
-func pkcs7Unpad(data []byte) ([]byte, error) {
-	length := len(data)
-	if length == 0 {
-		return nil, errors.New("pkcs7Unpad: Empty ciphertext")
-	}
-
-	padding := int(data[length-1])
-	if padding > length || padding == 0 {
-		return nil, errors.New("pkcs7Unpad: Invalid padding length")
-	}
-
-	for i := 0; i < padding; i++ {
-		if data[length-1-i] != byte(padding) {
-			return nil, errors.New("pkcs7Unpad: Invalid padding byte value")
-		}
-	}
-	return data[:length-padding], nil
+	// Remove padding
+	return plaintext[:len(plaintext)-paddingLength], nil
 }
 
 // In secure_channel.go, update the SendEncrypted method:
@@ -549,6 +554,7 @@ func (sc *SecureChannel) Close() {
 	sc.DecryptionKey = nil
 	sc.ECDSAPrivKey = nil // Changed from PrivateKey
 	sc.ECDSAPubKey = nil  // Changed from PeerPublicKey
+	sc.MACKey = nil
 
 	sc.Established = false
 	fmt.Printf("Secure channel with peer %s closed\n", sc.PeerID)

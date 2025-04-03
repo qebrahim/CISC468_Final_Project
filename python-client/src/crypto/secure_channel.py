@@ -3,23 +3,27 @@ import time
 import base64
 import json
 import logging
-from pathlib import Path
 import socket
+import hashlib
+from pathlib import Path
+from typing import Dict, Optional, Union
+
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hmac
 
-
-BLOCK_SIZE = 16  # AES block size
-
-
-
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Global registry of secure channels
-secure_channels = {}
+secure_channels: Dict[str, 'SecureChannel'] = {}
 
 class SecureChannel:
     """
@@ -27,55 +31,72 @@ class SecureChannel:
     (Elliptic Curve Diffie-Hellman Ephemeral) key exchange.
     """
     
-    def __init__(self, peer_id, socket_conn=None, is_initiator=False):
+    def __init__(self, peer_id: str, socket_conn: Optional[socket.socket] = None, is_initiator: bool = False):
+        """
+        Initialize a secure channel with a specific peer.
+        
+        :param peer_id: Unique identifier for the peer
+        :param socket_conn: Optional socket connection
+        :param is_initiator: Whether this endpoint is initiating the connection
+        """
         self.peer_id = peer_id
         self.socket = socket_conn
         self.is_initiator = is_initiator
         self.established = False
-        self.session_id = None
+        self.session_id: Optional[str] = None
         
         # Ephemeral key pair for this session
-        self.private_key = None
-        self.public_key = None
-        self.peer_public_key = None
+        self.private_key: Optional[ec.EllipticCurvePrivateKey] = None
+        self.public_key: Optional[ec.EllipticCurvePublicKey] = None
+        self.peer_public_key: Optional[ec.EllipticCurvePublicKey] = None
         
         # Derived keys for encryption/decryption
-        self.encryption_key = None
-        self.decryption_key = None
+        self.encryption_key: Optional[bytes] = None
+        self.decryption_key: Optional[bytes] = None
+        self.mac_key: Optional[bytes] = None
+        
+        # Packet counter for IVs and replay protection
+        self.send_counter = 0
+        self.receive_counter = 0
         
         # Generate ephemeral key pair
         self._generate_ephemeral_keys()
         
-        # Packet counter for IVs
-        self.send_counter = 0
-        self.receive_counter = 0
-        
         logger.info(f"Secure channel created for peer {peer_id}")
     
-    def _generate_ephemeral_keys(self):
+    def _generate_ephemeral_keys(self) -> None:
         """Generate ephemeral EC key pair for this session"""
-        self.private_key = ec.generate_private_key(
-            ec.SECP256R1(),
-            default_backend()
-        )
-        self.public_key = self.private_key.public_key()
-        
-        # Serialize public key for transmission
-        self.public_key_bytes = self.public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-        
-        logger.debug("Generated ephemeral EC key pair")
+        try:
+            # Use NIST P-256 curve (comparable to secp256r1)
+            self.private_key = ec.generate_private_key(
+                ec.SECP256R1(),
+                default_backend()
+            )
+            self.public_key = self.private_key.public_key()
+            
+            # Serialize public key for transmission
+            self.public_key_bytes = self.public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            
+            logger.debug("Generated ephemeral EC key pair")
+        except Exception as e:
+            logger.error(f"Error generating ephemeral keys: {e}")
+            raise
     
-    def initiate_key_exchange(self):
-        """Initiate the key exchange process (client side)"""
+    def initiate_key_exchange(self) -> bool:
+        """
+        Initiate the key exchange process (client side)
+        
+        :return: True if key exchange initiated successfully, False otherwise
+        """
         if not self.socket:
             logger.error("No socket connection available")
             return False
         
         try:
-            # Generate a unique session ID
+            # Generate a cryptographically secure session ID
             self.session_id = os.urandom(16).hex()
             
             # Create key exchange message
@@ -86,24 +107,82 @@ class SecureChannel:
             }
             
             # Send key exchange message
-            self.socket.sendall(f"SECURE:EXCHANGE:{json.dumps(key_exchange_msg)}".encode('utf-8'))
-            logger.info(f"Sent key exchange request to peer {self.peer_id}")
+            full_message = f"SECURE:EXCHANGE:{json.dumps(key_exchange_msg)}"
+            self.socket.sendall(full_message.encode('utf-8'))
             
-            # Wait for response (handled by protocol handler)
+            logger.info(f"Sent key exchange request to peer {self.peer_id}")
             return True
             
         except Exception as e:
             logger.error(f"Error initiating key exchange: {e}")
             return False
     
-    def handle_key_exchange(self, exchange_data):
-        """Handle key exchange message from peer"""
+    def _derive_keys(self, shared_secret: bytes) -> None:
+        """
+        Derive encryption, decryption, and MAC keys using HKDF-like approach
+        
+        :param shared_secret: The shared secret derived from key exchange
+        """
         try:
+            # Define different info strings for each key derivation
+            encryption_info = b"encryption_key"
+            decryption_info = b"decryption_key"
+            mac_info = b"mac_key"
+            
+            # Use a key derivation function with salt and info
+            if self.is_initiator:
+                # Initiator derives keys differently
+                self.encryption_key = self._derive_subkey(shared_secret, encryption_info)
+                self.decryption_key = self._derive_subkey(shared_secret, decryption_info)
+                self.mac_key = self._derive_subkey(shared_secret, mac_info)
+            else:
+                # Responder derives keys differently
+                self.decryption_key = self._derive_subkey(shared_secret, encryption_info)
+                self.encryption_key = self._derive_subkey(shared_secret, decryption_info)
+                self.mac_key = self._derive_subkey(shared_secret, mac_info)
+            
+            logger.debug("Successfully derived encryption, decryption, and MAC keys")
+        except Exception as e:
+            logger.error(f"Error deriving keys: {e}")
+            raise
+    
+    def _derive_subkey(self, shared_secret: bytes, info: bytes, length: int = 32) -> bytes:
+        """
+        Derive a subkey using HKDF-like key derivation
+        
+        :param shared_secret: Base shared secret
+        :param info: Context-specific info string
+        :param length: Desired key length
+        :return: Derived subkey
+        """
+        try:
+            # Use PBKDF2 for key derivation with SHA-256
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=length,
+                salt=info,
+                iterations=100000,
+                backend=default_backend()
+            )
+            return kdf.derive(shared_secret)
+        except Exception as e:
+            logger.error(f"Error deriving subkey: {e}")
+            raise
+    
+    def handle_key_exchange(self, exchange_data: Dict[str, str]) -> bool:
+        """
+        Handle key exchange message from peer
+        
+        :param exchange_data: Key exchange message data
+        :return: True if key exchange successful, False otherwise
+        """
+        try:
+            # Extract and validate exchange data
             peer_id = exchange_data.get("peer_id")
             session_id = exchange_data.get("session_id")
             peer_public_key_pem = exchange_data.get("public_key")
             
-            if not peer_id or not session_id or not peer_public_key_pem:
+            if not all([peer_id, session_id, peer_public_key_pem]):
                 logger.error("Missing data in key exchange message")
                 return False
             
@@ -116,19 +195,26 @@ class SecureChannel:
                 default_backend()
             )
             
+            # Compute shared secret using ECDH
+            shared_secret = self.private_key.exchange(
+                ec.ECDH(), 
+                self.peer_public_key
+            )
+            
+            # Derive encryption keys
+            self._derive_keys(shared_secret)
+            
             # If we're the responder, send our public key back
-            if not self.is_initiator:
+            if not self.is_initiator and self.socket:
                 response = {
                     "peer_id": self.peer_id,
                     "session_id": self.session_id,
                     "public_key": self.public_key_bytes.decode('utf-8')
                 }
                 
-                self.socket.sendall(f"SECURE:EXCHANGE_RESPONSE:{json.dumps(response)}".encode('utf-8'))
+                response_message = f"SECURE:EXCHANGE_RESPONSE:{json.dumps(response)}"
+                self.socket.sendall(response_message.encode('utf-8'))
                 logger.info(f"Sent key exchange response to peer {peer_id}")
-            
-            # Derive shared secret and encryption keys
-            self._derive_shared_secret()
             
             # Mark the channel as established
             self.established = True
@@ -143,19 +229,18 @@ class SecureChannel:
             logger.error(f"Error handling key exchange: {e}")
             return False
     
-    def handle_exchange_response(self, response_data):
-        """Handle exchange response from peer (client side)"""
+    def handle_exchange_response(self, response_data: Dict[str, str]) -> bool:
+        """
+        Handle exchange response from peer (client side)
+        
+        :param response_data: Response data from the peer
+        :return: True if response handled successfully, False otherwise
+        """
         try:
+            # Extract and validate response data
             peer_id = response_data.get("peer_id")
             session_id = response_data.get("session_id")
             peer_public_key_pem = response_data.get("public_key")
-            
-            # Add detailed logging
-            logger.debug(f"Handling exchange response:")
-            logger.debug(f"Peer ID: {peer_id}")
-            logger.debug(f"Session ID: {session_id}")
-            logger.debug(f"Our session ID: {self.session_id}")
-            logger.debug(f"Public key length: {len(peer_public_key_pem) if peer_public_key_pem else 0}")
             
             if not all([peer_id, session_id, peer_public_key_pem]):
                 logger.error("Missing required data in exchange response")
@@ -167,19 +252,19 @@ class SecureChannel:
                 return False
             
             # Load peer's public key
-            try:
-                self.peer_public_key = serialization.load_pem_public_key(
-                    peer_public_key_pem.encode('utf-8'),
-                    default_backend()
-                )
-            except Exception as e:
-                logger.error(f"Failed to load peer's public key: {e}")
-                return False
+            self.peer_public_key = serialization.load_pem_public_key(
+                peer_public_key_pem.encode('utf-8'),
+                default_backend()
+            )
             
-            # Derive shared secret and encryption keys
-            if not self._derive_shared_secret():
-                logger.error("Failed to derive shared secret")
-                return False
+            # Compute shared secret using ECDH
+            shared_secret = self.private_key.exchange(
+                ec.ECDH(), 
+                self.peer_public_key
+            )
+            
+            # Derive encryption keys
+            self._derive_keys(shared_secret)
             
             # Mark the channel as established
             self.established = True
@@ -192,84 +277,35 @@ class SecureChannel:
             
         except Exception as e:
             logger.error(f"Error handling exchange response: {e}")
-        return False
-    def _derive_shared_secret(self):
-        """Derive shared secret using ECDHE"""
-        try:
-            # Compute shared secret
-            shared_secret = self.private_key.exchange(
-                ec.ECDH(),
-                self.peer_public_key
-            )
-            
-            # Use HKDF to derive two separate keys for each direction
-            # We use different info values to derive different keys for each direction
-            if self.is_initiator:
-                # Initiator uses first key for sending, second for receiving
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,  # 256 bits for AES-256
-                    salt=None,
-                    info=b"initiator_to_responder"
-                ).derive(shared_secret)
-                
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"responder_to_initiator"
-                ).derive(shared_secret)
-            else:
-                # Responder uses first key for receiving, second for sending
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"initiator_to_responder"
-                ).derive(shared_secret)
-                
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"responder_to_initiator"
-                ).derive(shared_secret)
-            
-            logger.debug("Derived encryption and decryption keys")
-            
-            # Clear the private key for forward secrecy
-            # Once we've derived the shared secret, we don't need the private key anymore
-            # This ensures forward secrecy even if the device is compromised later
-            self.private_key = None
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error deriving shared secret: {e}")
             return False
     
-    def encrypt_message(self, plaintext):
-        """Encrypt a message using AES-CBC with enhanced compatibility with Go"""
+    def encrypt_message(self, plaintext: Union[str, bytes]) -> Optional[str]:
+        """
+        Encrypt a message using AES-CBC with HMAC for authentication
+        
+        :param plaintext: Message to encrypt
+        :return: Base64 encoded encrypted message or None if encryption fails
+        """
         if not self.established or not self.encryption_key:
             logger.error("Secure channel not established")
             return None
         
         try:
+            # Ensure plaintext is bytes
+            if isinstance(plaintext, str):
+                plaintext = plaintext.encode('utf-8')
+            
             # Generate IV (16 bytes for CBC)
             iv = os.urandom(16)
-            logger.debug(f"Generated IV (hex): {iv.hex()}")
             
-            # Manual PKCS7 padding
-            block_size = 16  # AES block size
+            # Pad the plaintext using PKCS7
+            block_size = 16
             padding_length = block_size - (len(plaintext) % block_size)
             if padding_length == 0:
                 padding_length = block_size
                 
             padding = bytes([padding_length]) * padding_length
             padded_data = plaintext + padding
-            
-            logger.debug(f"Plaintext length: {len(plaintext)}, Padding length: {padding_length}")
-            logger.debug(f"Padding bytes: {padding.hex()}")
             
             # Create AES-CBC cipher
             encryptor = Cipher(
@@ -278,26 +314,37 @@ class SecureChannel:
                 backend=default_backend()
             ).encryptor()
             
+            # Encrypt the padded data
             ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+            
+            # Compute HMAC for authentication
+            h = hmac.HMAC(self.mac_key, hashes.SHA256(), backend=default_backend())
+            h.update(iv + ciphertext)
+            mac = h.finalize()
             
             # Increment counter
             self.send_counter += 1
             
-            # Format: base64(iv) + ":" + base64(ciphertext)
-            encrypted_message = base64.b64encode(iv).decode('utf-8') + ":" + \
-                            base64.b64encode(ciphertext).decode('utf-8')
+            # Format: base64(iv) + ":" + base64(ciphertext) + ":" + base64(mac)
+            encrypted_message = (
+                f"{base64.b64encode(iv).decode('utf-8')}:"
+                f"{base64.b64encode(ciphertext).decode('utf-8')}:"
+                f"{base64.b64encode(mac).decode('utf-8')}"
+            )
             
-            logger.debug(f"Encrypted message format: {encrypted_message[:50]}...")
             return encrypted_message
             
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
-            import traceback
-            traceback.print_exc()
             return None
+    
+    def decrypt_message(self, encrypted_message: str) -> Optional[bytes]:
+        """
+        Decrypt a message using AES-CBC with HMAC verification
         
-    def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-CBC with improved padding handling"""
+        :param encrypted_message: Encrypted message string
+        :return: Decrypted message or None if decryption fails
+        """
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
@@ -305,17 +352,25 @@ class SecureChannel:
         try:
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            if len(parts) != 2:
-                logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
+            if len(parts) != 3:
+                logger.error(f"Invalid encrypted message format: expected 3 parts, got {len(parts)}")
                 return None
                 
-            # Extract IV and ciphertext
+            # Extract and decode IV, ciphertext, and MAC
             iv = base64.b64decode(parts[0])
             ciphertext = base64.b64decode(parts[1])
+            received_mac = base64.b64decode(parts[2])
             
-            logger.debug(f"IV length: {len(iv)}, Ciphertext length: {len(ciphertext)}")
+            # Verify MAC
+            h = hmac.HMAC(self.mac_key, hashes.SHA256(), backend=default_backend())
+            h.update(iv + ciphertext)
+            try:
+                h.verify(received_mac)
+            except Exception:
+                logger.error("MAC verification failed - message may have been tampered with")
+                return None
             
-            # Create AES-CBC cipher
+            # Create AES-CBC decryptor
             decryptor = Cipher(
                 algorithms.AES(self.decryption_key),
                 modes.CBC(iv),
@@ -340,18 +395,23 @@ class SecureChannel:
                     return None
                     
             plaintext = plaintext_padded[:-padding_length]
-            logger.debug(f"Decrypted length: {len(plaintext)}")
+            
+            # Increment receive counter
+            self.receive_counter += 1
             
             return plaintext
                 
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
-    def handle_encrypted_data(self, encrypted_data):
-        """Handle an incoming encrypted message"""
+    def handle_encrypted_data(self, encrypted_data: str) -> Optional[Dict[str, str]]:
+        """
+        Handle an incoming encrypted message
+        
+        :param encrypted_data: Encrypted message
+        :return: Decrypted message dictionary or None if processing fails
+        """
         try:
             # Decrypt the message
             plaintext = self.decrypt_message(encrypted_data)
@@ -382,45 +442,117 @@ class SecureChannel:
             
         except Exception as e:
             logger.error(f"Error handling encrypted data: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
-    def close(self):
-        """Close the secure channel"""
+    def send_encrypted_message(self, message_type: str, payload: str) -> bool:
+        """
+        Send an encrypted message through the secure channel
+        
+        :param message_type: Type of message
+        :param payload: Message payload
+        :return: True if message sent successfully, False otherwise
+        """
+        if not self.established or not self.socket:
+            logger.error("Secure channel not established or no socket available")
+            return False
+        
         try:
+            # Construct the message
+            full_message = f"{message_type}:{payload}"
+            
+            # Encrypt the message
+            encrypted_message = self.encrypt_message(full_message)
+            if not encrypted_message:
+                logger.error("Failed to encrypt message")
+                return False
+            
+            # Send the encrypted message
+            secure_message = f"SECURE:DATA:{encrypted_message}"
+            self.socket.sendall(secure_message.encode('utf-8'))
+            
+            logger.info(f"Sent encrypted message of type: {message_type}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error sending encrypted message: {e}")
+            return False
+    
+    def close(self) -> None:
+        """
+        Close the secure channel and clean up resources
+        """
+        try:
+            # Remove from global registry
             if self.peer_id in secure_channels:
                 del secure_channels[self.peer_id]
             
             # Clear sensitive data
             self.encryption_key = None
             self.decryption_key = None
+            self.mac_key = None
             self.private_key = None
             self.peer_public_key = None
             
+            # Close socket if it exists
+            if self.socket:
+                try:
+                    self.socket.close()
+                except Exception as socket_close_err:
+                    logger.error(f"Error closing socket: {socket_close_err}")
+            
+            # Reset channel state
             self.established = False
+            self.session_id = None
+            
             logger.info(f"Secure channel with peer {self.peer_id} closed")
             
         except Exception as e:
             logger.error(f"Error closing secure channel: {e}")
 
+# Utility functions
+def create_secure_channel(
+    peer_id: str, 
+    socket_conn: Optional[socket.socket] = None, 
+    is_initiator: bool = False
+) -> SecureChannel:
+    """
+    Create a new secure channel for a peer
+    
+    :param peer_id: Unique identifier for the peer
+    :param socket_conn: Optional socket connection
+    :param is_initiator: Whether this endpoint is initiating the connection
+    :return: Newly created SecureChannel instance
+    """
+    return SecureChannel(peer_id, socket_conn, is_initiator)
 
-def create_secure_channel(peer_id, socket_conn=None, is_initiator=False):
-    """Create a new secure channel for a peer"""
-    channel = SecureChannel(peer_id, socket_conn, is_initiator)
-    return channel
-
-def get_secure_channel(peer_id):
-    """Get an existing secure channel for a peer"""
+def get_secure_channel(peer_id: str) -> Optional[SecureChannel]:
+    """
+    Get an existing secure channel for a peer
+    
+    :param peer_id: Peer identifier
+    :return: Existing SecureChannel or None
+    """
     return secure_channels.get(peer_id)
 
-def handle_secure_message(conn, addr, message):
-    """Handle secure protocol messages"""
+def handle_secure_message(
+    conn: socket.socket, 
+    addr: Union[str, tuple], 
+    message: str
+) -> Dict[str, Union[str, bool]]:
+    """
+    Handle secure protocol messages
+    
+    :param conn: Socket connection
+    :param addr: Address of the peer
+    :param message: Secure protocol message
+    :return: Dictionary with processing result
+    """
     try:
+        # Split the message
         parts = message.split(':', 2)
         if len(parts) < 3:
             logger.error(f"Invalid secure message format: {message}")
-            return None
+            return {"status": "error", "message": "Invalid message format"}
     
         secure_command = parts[1]
         payload = parts[2]
@@ -434,42 +566,26 @@ def handle_secure_message(conn, addr, message):
         else:
             host, port = addr.split(':')
 
+        # Default to standard port if needed
         standardAddr = f"{host}:12345"
 
-        # Try to extract peer ID from the message payload
-        extracted_peer_id = None
+        # Attempt to parse payload
         try:
-            if secure_command in ["EXCHANGE", "EXCHANGE_RESPONSE"]:
-                exchange_data = json.loads(payload)
-                extracted_peer_id = exchange_data.get("peer_id")
-                logger.info(f"Extracted peer ID from payload: {extracted_peer_id}")
-        except Exception as e:
-            logger.error(f"Error extracting peer ID from payload: {e}")
+            exchange_data = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse payload JSON")
+            return {"status": "error", "message": "Invalid payload JSON"}
 
-        # Try to find contact by address
-        from crypto import auth_protocol
-        contact = auth_protocol.contact_manager.get_contact_by_address(standardAddr)
-        
-        if not contact:
-            logger.error(f"No authenticated contact for {standardAddr}")
-            
-            # If we extracted a peer ID from the payload, try to use that
-            if extracted_peer_id:
-                logger.info(f"Attempting to use extracted peer ID: {extracted_peer_id}")
-                contact = {"peer_id": extracted_peer_id}
-            else:
-                return {"status": "not_authenticated"}
-        
-        # Prioritize the extracted peer ID
-        peer_id = extracted_peer_id or contact["peer_id"]
-        logger.info(f"Using peer ID: {peer_id}")
+        # Try to extract peer ID
+        peer_id = exchange_data.get("peer_id")
+        if not peer_id:
+            logger.error("No peer ID found in payload")
+            return {"status": "not_authenticated", "message": "Missing peer ID"}
 
-        # The rest of the function remains the same as in the original implementation
+        # Process different secure commands
         if secure_command == "EXCHANGE":
             # Handle key exchange request
             try:
-                exchange_data = json.loads(payload)
-                
                 # Create a new secure channel as responder
                 channel = create_secure_channel(peer_id, conn, is_initiator=False)
                 
@@ -486,8 +602,6 @@ def handle_secure_message(conn, addr, message):
         elif secure_command == "EXCHANGE_RESPONSE":
             # Handle key exchange response
             try:
-                response_data = json.loads(payload)
-                
                 # Find the channel
                 channel = get_secure_channel(peer_id)
                 if not channel:
@@ -495,7 +609,7 @@ def handle_secure_message(conn, addr, message):
                     return {"status": "no_channel"}
                 
                 # Handle the exchange response
-                if channel.handle_exchange_response(response_data):
+                if channel.handle_exchange_response(exchange_data):
                     return {"status": "secure_channel_established", "peer_id": peer_id}
                 else:
                     return {"status": "exchange_failed"}
@@ -504,24 +618,12 @@ def handle_secure_message(conn, addr, message):
                 logger.error(f"Error handling exchange response: {e}")
                 return {"status": "error", "message": str(e)}
                 
-        # In secure_channel.py, modify the DATA command handling section
-
         elif secure_command == "DATA":
             # Handle encrypted data
             try:
-                # First try to find the channel using the connection object
-                channel = None
-                for existing_peer_id, existing_channel in secure_channels.items():
-                    if existing_channel.socket == conn:
-                        channel = existing_channel
-                        peer_id = existing_peer_id
-                        logger.info(f"Found secure channel for connection from {addr} with peer ID: {peer_id}")
-                        break
-                        
-                # If we couldn't find it by connection, try with the peer_id we already determined
-                if not channel and peer_id:
-                    channel = get_secure_channel(peer_id)
-                    
+                # Try to find the channel
+                channel = get_secure_channel(peer_id)
+                
                 if not channel:
                     logger.error(f"No secure channel established for peer {peer_id}")
                     return {"status": "no_secure_channel"}
@@ -531,7 +633,7 @@ def handle_secure_message(conn, addr, message):
                 if result:
                     return {
                         "status": "message_received",
-                        "peer_id": channel.peer_id,  # Use the peer ID from the channel
+                        "peer_id": peer_id,
                         "type": result["type"],
                         "payload": result["payload"]
                     }
@@ -540,20 +642,64 @@ def handle_secure_message(conn, addr, message):
                     
             except Exception as e:
                 logger.error(f"Error handling encrypted data: {e}")
-                import traceback
-                traceback.print_exc()
                 return {"status": "error", "message": str(e)}
         else:
             logger.error(f"Unknown secure command: {secure_command}")
             return {"status": "unknown_command"}
     except Exception as e:
         logger.error(f"Error handling secure message: {e}")
-        import traceback
-        traceback.print_exc()
         return {"status": "error", "message": str(e)}
+
+def establish_secure_channel(
+    peer_id: str, 
+    peer_addr: str, 
+    port: int = 12345
+) -> Dict[str, Union[str, SecureChannel]]:
+    """
+    Establish a secure channel with a peer
     
-def encrypt_file(input_file, output_file, key):
-    """Encrypt a file using AES-GCM"""
+    :param peer_id: Unique identifier for the peer
+    :param peer_addr: IP address or hostname of the peer
+    :param port: Port number to connect to
+    :return: Dictionary with connection status and channel
+    """
+    try:
+        # Create a new socket connection
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((peer_addr, port))
+        
+        # Create a secure channel
+        channel = create_secure_channel(peer_id, sock, is_initiator=True)
+        
+        # Initiate key exchange
+        if channel.initiate_key_exchange():
+            logger.info(f"Key exchange initiated with peer {peer_id}")
+            
+            return {
+                "status": "initiated", 
+                "channel": channel
+            }
+        else:
+            sock.close()
+            return {"status": "failed"}
+            
+    except Exception as e:
+        logger.error(f"Error establishing secure channel: {e}")
+        return {
+            "status": "error", 
+            "message": str(e)
+        }
+
+# File encryption utilities
+def encrypt_file(input_file: str, output_file: str, key: bytes) -> bool:
+    """
+    Encrypt a file using AES-GCM
+    
+    :param input_file: Path to the input file
+    :param output_file: Path to the output encrypted file
+    :param key: Encryption key
+    :return: True if encryption successful, False otherwise
+    """
     try:
         # Generate a random 96-bit IV
         iv = os.urandom(12)
@@ -587,8 +733,15 @@ def encrypt_file(input_file, output_file, key):
         logger.error(f"Error encrypting file: {e}")
         return False
 
-def decrypt_file(input_file, output_file, key):
-    """Decrypt a file using AES-GCM"""
+def decrypt_file(input_file: str, output_file: str, key: bytes) -> bool:
+    """
+    Decrypt a file using AES-GCM
+    
+    :param input_file: Path to the encrypted input file
+    :param output_file: Path to the decrypted output file
+    :param key: Decryption key
+    :return: True if decryption successful, False otherwise
+    """
     try:
         # Read the encrypted file
         with open(input_file, 'rb') as f:
@@ -618,38 +771,3 @@ def decrypt_file(input_file, output_file, key):
     except Exception as e:
         logger.error(f"Error decrypting file: {e}")
         return False
-
-# Utility function to establish a secure channel with a peer
-def establish_secure_channel(peer_id, peer_addr):
-    """Establish a secure channel with a peer"""
-    try:
-        # Parse address
-        if ":" in peer_addr:
-            host, port_str = peer_addr.split(":")
-            port = int(port_str)
-        else:
-            host = peer_addr
-            port = 12345  # Default port
-        
-        # Create a new socket connection
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((host, port))
-        
-        # Create a secure channel
-        channel = create_secure_channel(peer_id, sock, is_initiator=True)
-        
-        # Initiate key exchange
-        if channel.initiate_key_exchange():
-            logger.info(f"Key exchange initiated with peer {peer_id}")
-            
-            # The rest of the exchange will be handled by protocol.py
-            # when the peer responds
-            
-            return {"status": "initiated", "channel": channel}
-        else:
-            sock.close()
-            return {"status": "failed"}
-            
-    except Exception as e:
-        logger.error(f"Error establishing secure channel: {e}")
-        return {"status": "error", "message": str(e)}
