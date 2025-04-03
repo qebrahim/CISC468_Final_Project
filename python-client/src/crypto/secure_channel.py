@@ -11,6 +11,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
+
+BLOCK_SIZE = 16  # AES block size
+
+
+
 logger = logging.getLogger(__name__)
 
 # Global registry of secure channels
@@ -304,14 +309,10 @@ class SecureChannel:
                 logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
                 return None
                 
-            # Extract IV from first part
+            # Extract IV and ciphertext
             iv = base64.b64decode(parts[0])
-            if len(iv) != 16:  # CBC uses 16-byte IV
-                logger.error(f"Invalid IV length: {len(iv)}, expected 16")
-                return None
-                
-            # Extract ciphertext from second part
             ciphertext = base64.b64decode(parts[1])
+            
             logger.debug(f"Decrypting message with IV: {iv.hex()}")
             logger.debug(f"Ciphertext length: {len(ciphertext)}")
             
@@ -322,55 +323,22 @@ class SecureChannel:
                 backend=default_backend()
             ).decryptor()
             
-            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            logger.debug(f"Padded plaintext length: {len(padded_plaintext)}")
+            # Decrypt the data
+            plaintext_padded = decryptor.update(ciphertext) + decryptor.finalize()
             
-            # More robust PKCS7 unpadding
-            if len(padded_plaintext) == 0:
-                logger.error("Padded plaintext is empty")
+            # Remove PKCS7 padding manually
+            padding_length = plaintext_padded[-1]
+            if padding_length > 16:
+                logger.error(f"Invalid padding length: {padding_length}")
                 return None
                 
-            if len(padded_plaintext) % 16 != 0:
-                logger.error(f"Padded plaintext length ({len(padded_plaintext)}) is not a multiple of block size (16)")
-                return None
+            plaintext = plaintext_padded[:-padding_length]
             
-            # Get the padding value from the last byte    
-            padding_length = padded_plaintext[-1]
-            logger.debug(f"Padding byte value: {padding_length}")
-            
-            # Verify padding is valid
-            if padding_length == 0 or padding_length > 16:
-                logger.warning(f"Invalid padding byte value: {padding_length}, attempting fallback")
-                # Try a fallback approach - treat as corrupted and just return the data
-                plaintext = padded_plaintext
-            else:
-                # Check if we have enough bytes for the indicated padding
-                if len(padded_plaintext) < padding_length:
-                    logger.warning(f"Padding length ({padding_length}) exceeds data length ({len(padded_plaintext)})")
-                    plaintext = padded_plaintext
-                else:
-                    # Try to verify the padding
-                    padding_valid = True
-                    for i in range(1, padding_length + 1):
-                        if padded_plaintext[-i] != padding_length:
-                            logger.warning(f"Invalid padding at position {-i}: expected {padding_length}, got {padded_plaintext[-i]}")
-                            padding_valid = False
-                            break
-                    
-                    if padding_valid:
-                        # Remove padding
-                        plaintext = padded_plaintext[:-padding_length]
-                        logger.debug(f"Padding validation successful, plaintext length: {len(plaintext)}")
-                    else:
-                        # Fallback: try to interpret the message even with invalid padding
-                        logger.warning("Using plaintext with potentially invalid padding")
-                        plaintext = padded_plaintext
-            
-            # Increment counter
-            self.receive_counter += 1
+            # Debug logging
+            logger.debug(f"Decrypted plaintext (hex): {plaintext.hex()}")
             
             return plaintext
-            
+                
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
             import traceback

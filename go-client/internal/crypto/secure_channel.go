@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -336,6 +337,10 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	// Add PKCS7 padding to plaintext
 	plaintext = pkcs7Pad(plaintext, aes.BlockSize)
 
+	fmt.Printf("Padded plaintext: %v\n", plaintext)
+	// Print IV for debugging
+	fmt.Printf("IV length: %d, IV bytes: %v\n", len(iv), iv)
+
 	// Encrypt with CBC mode
 	mode := cipher.NewCBCEncrypter(block, iv)
 	ciphertext := make([]byte, len(plaintext))
@@ -415,7 +420,7 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 
 	// Try more permissive unpadding
 	var unpadErr error
-	unpadded, unpadErr := pkcs7Unpad(plaintext, aes.BlockSize)
+	unpadded, unpadErr := pkcs7Unpad(plaintext)
 
 	if unpadErr != nil {
 		fmt.Printf("Warning: unpadding error: %v\n", unpadErr)
@@ -451,52 +456,22 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return append(data, padtext...)
 }
 
-// Improved Helper function for PKCS7 unpadding with better error handling
-func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
+func pkcs7Unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
-		return nil, fmt.Errorf("empty data")
-	}
-	if length%blockSize != 0 {
-		return nil, fmt.Errorf("data is not a multiple of the block size")
+		return nil, errors.New("pkcs7Unpad: Empty ciphertext")
 	}
 
 	padding := int(data[length-1])
-	if padding > blockSize {
-		fmt.Printf("WARNING: Invalid padding size: %d, block size: %d\n", padding, blockSize)
-		// For compatibility with Python, try just removing the last byte
-		return data[:length-1], nil
+	if padding > length || padding == 0 {
+		return nil, errors.New("pkcs7Unpad: Invalid padding length")
 	}
 
-	if padding == 0 {
-		return nil, fmt.Errorf("invalid padding value (0)")
-	}
-
-	// Verify padding is correct
-	paddingStart := length - padding
-	if paddingStart < 0 {
-		fmt.Printf("WARNING: Padding start index would be negative: %d\n", paddingStart)
-		return data[:length-1], nil
-	}
-
-	// Print padding bytes for debugging
-	fmt.Printf("Padding bytes: ")
-	for i := paddingStart; i < length; i++ {
-		fmt.Printf("%d ", data[i])
-	}
-	fmt.Println()
-
-	// More permissive padding check that allows for partial validation
-	for i := length - 1; i >= paddingStart; i-- {
-		if data[i] != byte(padding) {
-			fmt.Printf("WARNING: Invalid padding at position %d: expected %d, got %d\n",
-				i, padding, data[i])
-
-			// For compatibility, try simple truncation
-			return data[:length-1], nil
+	for i := 0; i < padding; i++ {
+		if data[length-1-i] != byte(padding) {
+			return nil, errors.New("pkcs7Unpad: Invalid padding byte value")
 		}
 	}
-
 	return data[:length-padding], nil
 }
 
