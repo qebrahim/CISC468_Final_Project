@@ -445,12 +445,16 @@ def handle_secure_message(conn, addr, message):
         # Prioritize the extracted peer ID
         peer_id = extracted_peer_id or contact["peer_id"]
         logger.info(f"Using peer ID: {peer_id}")
+        if not hasattr(handle_secure_message, 'conn_to_peer_id'):
+            handle_secure_message.conn_to_peer_id = {}
 
         # The rest of the function remains the same as in the original implementation
         if secure_command == "EXCHANGE":
             # Handle key exchange request
             try:
                 exchange_data = json.loads(payload)
+                handle_secure_message.conn_to_peer_id[id(conn)] = peer_id
+
                 
                 # Create a new secure channel as responder
                 channel = create_secure_channel(peer_id, conn, is_initiator=False)
@@ -489,7 +493,17 @@ def handle_secure_message(conn, addr, message):
         elif secure_command == "DATA":
             # Handle encrypted data
             try:
-                channel = get_secure_channel(peer_id)
+                
+                
+                conn_id = id(conn)
+                mapped_peer_id = handle_secure_message.conn_to_peer_id.get(conn_id)
+            
+                if mapped_peer_id:
+                    logger.info(f"Using mapped peer ID for DATA: {mapped_peer_id}")
+                    channel = get_secure_channel(mapped_peer_id)
+                else:
+                    logger.info(f"Using default peer ID: {peer_id}")
+                    channel = get_secure_channel(peer_id)
                 logger.debug(f"Channel lookup with peer_id: {peer_id}")
                 logger.debug(f"Available secure channels: {list(secure_channels.keys())}")
                 
