@@ -46,6 +46,7 @@ var secureFileTransfers = make(map[string]*SecureFileTransfer)
 
 func main() {
 	// Initialize
+	// Initialize global variables
 	connectedPeers = make(map[string]net.Conn)
 	serviceName := "_p2p-share._tcp."
 	mdns := discovery.NewMDNSDiscovery(serviceName)
@@ -74,7 +75,7 @@ func main() {
 	startServer()
 
 	// Discover initial peers
-	fmt.Println("🔍 Browsing for services...")
+	fmt.Println(" Browsing for services...")
 	peers, err := mdns.DiscoverPeers()
 	if err != nil {
 		fmt.Printf(" Error discovering peers: %v\n", err)
