@@ -272,6 +272,69 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
             return None
+    def debug_decryption(self, nonce, key, ciphertext, tag, aad):
+        """
+        Comprehensive debugging for AES-GCM decryption
+        
+        Args:
+            nonce (bytes): Initialization vector
+            key (bytes): Encryption key
+            ciphertext (bytes): Encrypted data
+            tag (bytes): Authentication tag
+            aad (bytes): Additional Authenticated Data
+        """
+        import binascii
+        
+        # Logging function with consistent formatting
+        def log_hex(name, data):
+            print(f"{name}: {binascii.hexlify(data).decode()}")
+            print(f"{name} Length: {len(data)} bytes")
+        
+        # Log all input parameters
+        print("AES-GCM Decryption Debug:")
+        log_hex("Nonce", nonce)
+        log_hex("Key", key)
+        log_hex("Ciphertext", ciphertext)
+        log_hex("Tag", tag)
+        log_hex("AAD", aad)
+        
+        # Attempt decryption with detailed error handling
+        try:
+            # Create cipher
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            
+            cipher = Cipher(
+                algorithms.AES(key), 
+                modes.GCM(nonce, tag), 
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            
+            # Authenticate AAD
+            decryptor.authenticate_additional_data(aad)
+            
+            # Attempt decryption
+            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            print("Decryption Successful!")
+            log_hex("Plaintext", plaintext)
+            return plaintext
+        
+        except Exception as e:
+            print(f"Decryption Failed: {type(e).__name__}")
+            print(f"Error Details: {str(e)}")
+            
+            # Additional diagnostics for common issues
+            if "InvalidTag" in str(e):
+                print("\n--- Tag Validation Failure Diagnostics ---")
+                print("Possible causes:")
+                print("1. Incorrect key")
+                print("2. Corrupted ciphertext")
+                print("3. Incorrect nonce")
+                print("4. Incorrect AAD")
+            
+            return None
     
     def decrypt_message(self, encrypted_message):
         """Decrypt a message using AES-GCM"""
@@ -279,61 +342,30 @@ class SecureChannel:
             logger.error("Secure channel not established")
             return None
         
+       
+            
         try:
-            # Parse the encrypted message
-            parts = encrypted_message.split(":")
-            logger.debug(f"Received encrypted message with {len(parts)} parts")
+            # Your existing parsing logic
+            iv = encrypted_message[:12]
+    
+            # The Go implementation places the tag at the end
+            # The tag is 16 bytes
+            ciphertext = encrypted_message[12:-16]
+            tag = encrypted_message[-16:]
             
-            if len(parts) == 2:
-                # Go client format: nonce:ciphertext_with_tag
-                # In Go's GCM implementation, the tag is the LAST 16 bytes of the ciphertext
-                nonce_b64, combined_b64 = parts
-                nonce = base64.b64decode(nonce_b64)
-                combined = base64.b64decode(combined_b64)
-                
-                # The GCM tag is 16 bytes and is at the end of the combined data
-                if len(combined) < 16:
-                    logger.error("Ciphertext too short to contain authentication tag")
-                    return None
-                    
-                # In Go's cipher.NewGCM().Seal implementation, the tag is appended to the ciphertext
-                ciphertext = combined[:-16]  # Everything except the last 16 bytes
-                tag = combined[-16:]  # Last 16 bytes are the tag
-                
-                logger.debug(f"Extracted tag from ciphertext. Ciphertext len: {len(ciphertext)}, Tag len: {len(tag)}")
-                
-            elif len(parts) == 3:
-                # Python client format: nonce:ciphertext:tag
-                nonce_b64, ciphertext_b64, tag_b64 = parts
-                nonce = base64.b64decode(nonce_b64)
-                ciphertext = base64.b64decode(ciphertext_b64)
-                tag = base64.b64decode(tag_b64)
-                
-            else:
-                logger.error(f"Invalid encrypted message format: {len(parts)} parts")
-                return None
-            
-            # Create a decryptor with explicit tag
-            aes = algorithms.AES(self.decryption_key)
-            cipher = Cipher(aes, modes.GCM(nonce, tag), backend=default_backend())
+            # Create decryptor
+            cipher = Cipher(
+                algorithms.AES(key),
+                modes.GCM(iv, tag),
+                backend=default_backend()
+            )
             decryptor = cipher.decryptor()
-            
-            # Add associated data (AAD) for authentication
-            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-            decryptor.authenticate_additional_data(aad)
-            
-            # Decrypt the ciphertext
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            
-            # Increment the counter
-            self.receive_counter += 1
-            
-            return plaintext
-            
+    
+            # Decrypt the data
+            return decryptor.update(ciphertext) + decryptor.finalize()
+        
         except Exception as e:
-            logger.error(f"Error decrypting message: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Decryption error: {e}")
             return None
     
     def send_encrypted(self, message_type, payload):

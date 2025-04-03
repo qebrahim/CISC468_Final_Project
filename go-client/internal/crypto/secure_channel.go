@@ -341,7 +341,8 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	if !sc.Established || sc.EncryptionKey == nil {
 		return "", fmt.Errorf("secure channel not established")
 	}
-
+	// print length ofsc.encryptionkey
+	fmt.Printf("Encrypt: encryption key length: %d\n", len(sc.EncryptionKey))
 	// Create AES-GCM cipher
 	block, err := aes.NewCipher(sc.EncryptionKey)
 	if err != nil {
