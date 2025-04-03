@@ -607,6 +607,7 @@ def handle_request(conn, addr):
                 else:
                     conn.sendall(b"ERR:INVALID_REQUEST")
             elif command == "MIGRATE_KEY":
+                from crypto import auth_protocol
                 if len(parts) > 1:
                     payload = parts[1]
                     # The message might be split due to size, try to get complete message

@@ -8,9 +8,10 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes, serialization, utils
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.exceptions import InvalidSignature
+import hashlib
 
 from crypto.keys import generate_keypair, save_private_key, save_public_key, load_private_key, load_public_key
 
@@ -320,21 +321,13 @@ def handle_key_migration(message, addr, conn, contact_manager, authentication):
 
 
 def verify_migration_signature(message, signature_b64, public_key_pem):
-    """
-    Verify a migration signature using the public key.
-    
-    Args:
-        message: The message that was signed
-        signature_b64: Base64 encoded signature
-        public_key_pem: PEM encoded public key
-        
-    Returns:
-        bool: True if the signature is valid
-    """
     try:
         # Convert message to bytes if it's a string
         if isinstance(message, str):
             message = message.encode('utf-8')
+        
+        # Pre-hash the message to match Go implementation
+        message_hash = hashlib.sha256(message).digest()
         
         # Decode the signature
         signature = base64.b64decode(signature_b64)
@@ -344,15 +337,16 @@ def verify_migration_signature(message, signature_b64, public_key_pem):
             public_key_pem.encode('utf-8')
         )
         
-        # Verify the signature
+        # Verify the signature on the pre-hashed message
         public_key.verify(
             signature,
-            message,
+            message_hash,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
                 salt_length=padding.PSS.MAX_LENGTH
             ),
-            hashes.SHA256()
+            # No hash algorithm here since we pre-hashed the message
+            utils.Prehashed(hashes.SHA256())
         )
         
         return True
