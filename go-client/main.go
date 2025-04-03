@@ -58,10 +58,10 @@ func main() {
 	var err error
 	hashManager, err = crypto.NewHashManager(peerID)
 	if err != nil {
-		fmt.Printf("⚠️ Warning: Failed to initialize hash manager: %v\n", err)
+		fmt.Printf(" Warning: Failed to initialize hash manager: %v\n", err)
 		// Continue without hash verification if failed
 	} else {
-		fmt.Println("✅ Hash manager initialized for file verification")
+		fmt.Println(" Hash manager initialized for file verification")
 	}
 
 	// Initialize security system
@@ -77,12 +77,12 @@ func main() {
 	fmt.Println("🔍 Browsing for services...")
 	peers, err := mdns.DiscoverPeers()
 	if err != nil {
-		fmt.Printf("❌ Error discovering peers: %v\n", err)
+		fmt.Printf(" Error discovering peers: %v\n", err)
 	} else {
 		if len(peers) == 0 {
-			fmt.Println("⚠️ No peers found initially.")
+			fmt.Println(" No peers found initially.")
 		} else {
-			fmt.Println("✅ Discovered peers:")
+			fmt.Println(" Discovered peers:")
 			for _, peer := range peers {
 				fmt.Println("   ➡", peer)
 				// Automatically connect to discovered peers
@@ -103,14 +103,14 @@ func setupSecurity(peerID string) {
 	// Create keys directory if it doesn't exist
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Printf("⚠️ Warning: Failed to get home directory: %v\n", err)
+		fmt.Printf(" Warning: Failed to get home directory: %v\n", err)
 		return
 	}
 
 	keysDir := filepath.Join(homeDir, ".p2p-share", "keys")
 	err = os.MkdirAll(keysDir, 0755)
 	if err != nil {
-		fmt.Printf("⚠️ Warning: Failed to create keys directory: %v\n", err)
+		fmt.Printf(" Warning: Failed to create keys directory: %v\n", err)
 		return
 	}
 
@@ -122,30 +122,30 @@ func setupSecurity(peerID string) {
 		fmt.Println("Generating new key pair...")
 		err = crypto.GenerateKeyPair(privateKeyPath, publicKeyPath)
 		if err != nil {
-			fmt.Printf("⚠️ Warning: Failed to generate key pair: %v\n", err)
+			fmt.Printf(" Warning: Failed to generate key pair: %v\n", err)
 			return
 		}
-		fmt.Println("✅ Key pair generated successfully")
+		fmt.Println(" Key pair generated successfully")
 	}
 
 	// Initialize contact manager
 	contactManager, err = crypto.NewContactManager(peerID)
 	if err != nil {
-		fmt.Printf("⚠️ Warning: Failed to initialize contact manager: %v\n", err)
+		fmt.Printf(" Warning: Failed to initialize contact manager: %v\n", err)
 		return
 	}
 
 	// Initialize authentication system
 	authentication, err = crypto.NewPeerAuthentication(peerID, contactManager)
 	if err != nil {
-		fmt.Printf("⚠️ Warning: Failed to initialize authentication system: %v\n", err)
+		fmt.Printf(" Warning: Failed to initialize authentication system: %v\n", err)
 		return
 	}
 
 	// Initialize authentication protocol
 	// Initialize authentication protocol
 	crypto.InitAuthentication(peerID, contactManager, authentication)
-	fmt.Println("✅ Security system initialized")
+	fmt.Println(" Security system initialized")
 }
 
 // startServer initializes a TCP server to handle incoming connections
@@ -154,24 +154,24 @@ func startServer() {
 	go func() {
 		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
 		if err != nil {
-			fmt.Printf("❌ Error starting server: %v\n", err)
+			fmt.Printf(" Error starting server: %v\n", err)
 			return
 		}
 		defer listener.Close()
 
-		fmt.Printf("✅ Server listening on port %d\n", serverPort)
+		fmt.Printf(" Server listening on port %d\n", serverPort)
 		// Add this to your main.go or where your application starts
 		fmt.Printf("DEBUG: ContactManager initialized with storage path: %s\n", contactManager.StoragePath)
 
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				fmt.Printf("❌ Error accepting connection: %v\n", err)
+				fmt.Printf(" Error accepting connection: %v\n", err)
 				continue
 			}
 
 			remoteAddr := conn.RemoteAddr().String()
-			fmt.Printf("✅ Accepted connection from %s\n", remoteAddr)
+			fmt.Printf(" Accepted connection from %s\n", remoteAddr)
 
 			// Store connection in connected peers map
 			connectedPeers[remoteAddr] = conn
@@ -861,11 +861,11 @@ func connectToPeer(address string, port int) {
 	// Establish TCP connection
 	conn, err := net.Dial("tcp", fullAddress)
 	if err != nil {
-		fmt.Printf("❌ Connection failed: %v\n", err)
+		fmt.Printf(" Connection failed: %v\n", err)
 		return
 	}
 
-	fmt.Println("✅ Connection established!")
+	fmt.Println(" Connection established!")
 
 	// Store connection in map
 	connectedPeers[fullAddress] = conn
@@ -890,7 +890,7 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		}
 
 		message := string(buffer[:n])
-		fmt.Printf("📩 Received from %s: %s\n", peerAddr, message)
+		fmt.Printf(" Received from %s: %s\n", peerAddr, message)
 
 		// Parse and process the message
 		parts := strings.SplitN(message, ":", 2)
@@ -1600,7 +1600,7 @@ func requestFileRegular(host string, port int, filename string) {
 		fmt.Println("Verifying file integrity...")
 		verified, err := hashManager.VerifyFileHash(savePath, fileHash)
 		if err != nil || !verified {
-			fmt.Printf("⚠️ File verification failed: %v\n", err)
+			fmt.Printf(" File verification failed: %v\n", err)
 
 			// Ask if user wants to keep the file
 			fmt.Print("Keep potentially corrupted file? (y/n): ")
@@ -1613,7 +1613,7 @@ func requestFileRegular(host string, port int, filename string) {
 			}
 			fmt.Println("File kept despite verification failure")
 		} else {
-			fmt.Println("✅ File integrity verified successfully")
+			fmt.Println(" File integrity verified successfully")
 
 			// Store hash information
 			hashManager.AddFileHash(transferFilename, savePath, fmt.Sprintf("%s:%d", host, port))
