@@ -7,15 +7,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -311,14 +308,6 @@ func (sc *SecureChannel) DeriveSharedSecret() error {
 	sc.ECDSAPrivKey = nil
 
 	return nil
-}
-
-// deriveKey derives a key from shared secret using a simple KDF
-func deriveKey(secret, info []byte, length int) []byte {
-	h := sha256.New()
-	h.Write(secret)
-	h.Write(info)
-	return h.Sum(nil)[:length]
 }
 
 // EncryptMessage encrypts a message using AES-GCM
@@ -774,116 +763,6 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// EncryptFile encrypts a file using AES-GCM
-func EncryptFile(inputFile, outputFile string, key []byte) error {
-	// Open input file
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("error opening input file: %v", err)
-	}
-	defer inFile.Close()
-
-	// Create output file
-	outFile, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("error creating output file: %v", err)
-	}
-	defer outFile.Close()
-
-	// Generate a random IV (12 bytes for GCM)
-	iv := make([]byte, 12)
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return fmt.Errorf("error generating IV: %v", err)
-	}
-
-	// Create cipher
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return fmt.Errorf("error creating cipher: %v", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("error creating GCM: %v", err)
-	}
-
-	// Write IV to the output file
-	if _, err := outFile.Write(iv); err != nil {
-		return fmt.Errorf("error writing IV: %v", err)
-	}
-
-	// Read the input file
-	data, err := io.ReadAll(inFile)
-	if err != nil {
-		return fmt.Errorf("error reading input file: %v", err)
-	}
-
-	// Encrypt the data
-	encrypted := gcm.Seal(nil, iv, data, nil)
-
-	// Write the encrypted data to the output file
-	if _, err := outFile.Write(encrypted); err != nil {
-		return fmt.Errorf("error writing encrypted data: %v", err)
-	}
-
-	return nil
-}
-
-// DecryptFile decrypts a file using AES-GCM
-func DecryptFile(inputFile, outputFile string, key []byte) error {
-	// Open input file
-	inFile, err := os.Open(inputFile)
-	if err != nil {
-		return fmt.Errorf("error opening input file: %v", err)
-	}
-	defer inFile.Close()
-
-	// Create output file
-	outFile, err := os.Create(outputFile)
-	if err != nil {
-		return fmt.Errorf("error creating output file: %v", err)
-	}
-	defer outFile.Close()
-
-	// Read the IV from the input file
-	iv := make([]byte, 12)
-	if _, err := io.ReadFull(inFile, iv); err != nil {
-		return fmt.Errorf("error reading IV: %v", err)
-	}
-
-	// Create cipher
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return fmt.Errorf("error creating cipher: %v", err)
-	}
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("error creating GCM: %v", err)
-	}
-
-	// Read the encrypted data
-	data, err := io.ReadAll(inFile)
-	if err != nil {
-		return fmt.Errorf("error reading encrypted data: %v", err)
-	}
-
-	// Decrypt the data
-	decrypted, err := gcm.Open(nil, iv, data, nil)
-	if err != nil {
-		return fmt.Errorf("error decrypting data: %v", err)
-	}
-
-	// Write the decrypted data to the output file
-	if _, err := outFile.Write(decrypted); err != nil {
-		return fmt.Errorf("error writing decrypted data: %v", err)
-	}
-
-	return nil
 }
 
 // Global instance of the contact manager
