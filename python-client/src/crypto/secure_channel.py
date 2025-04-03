@@ -282,20 +282,34 @@ class SecureChannel:
         try:
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            if len(parts) != 3:
-                logger.error("Invalid encrypted message format")
+            logger.debug(f"Received encrypted message with {len(parts)} parts")
+            
+            if len(parts) == 2:
+                # Go client format: nonce:ciphertext
+                nonce_b64, ciphertext_b64 = parts
+                nonce = base64.b64decode(nonce_b64)
+                ciphertext = base64.b64decode(ciphertext_b64)
+                
+                # Create a decryptor without explicit tag
+                aes = algorithms.AES(self.decryption_key)
+                cipher = Cipher(aes, modes.GCM(nonce), backend=default_backend())
+                decryptor = cipher.decryptor()
+                
+            elif len(parts) == 3:
+                # Python client format: nonce:ciphertext:tag
+                nonce_b64, ciphertext_b64, tag_b64 = parts
+                nonce = base64.b64decode(nonce_b64)
+                ciphertext = base64.b64decode(ciphertext_b64)
+                tag = base64.b64decode(tag_b64)
+                
+                # Create a decryptor with explicit tag
+                aes = algorithms.AES(self.decryption_key)
+                cipher = Cipher(aes, modes.GCM(nonce, tag), backend=default_backend())
+                decryptor = cipher.decryptor()
+                
+            else:
+                logger.error(f"Invalid encrypted message format: {len(parts)} parts")
                 return None
-            
-            nonce = base64.b64decode(parts[0])
-            ciphertext = base64.b64decode(parts[1])
-            tag = base64.b64decode(parts[2])
-            
-            # Create a decryptor
-            decryptor = Cipher(
-                algorithms.AES(self.decryption_key),
-                modes.GCM(nonce, tag),
-                backend=default_backend()
-            ).decryptor()
             
             # Add associated data (AAD) for authentication
             aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
@@ -311,6 +325,8 @@ class SecureChannel:
             
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def send_encrypted(self, message_type, payload):
