@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -311,6 +312,7 @@ func deriveKey(secret, info []byte, length int) []byte {
 }
 
 // EncryptMessage encrypts a message using AES-GCM
+// EncryptMessage encrypts a message using AES-CBC instead of GCM
 func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -319,49 +321,37 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		return "", fmt.Errorf("secure channel not established")
 	}
 
-	// Create AES-GCM cipher
+	// Create AES cipher
 	block, err := aes.NewCipher(sc.EncryptionKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating cipher: %v", err)
 	}
 
-	// Generate a nonce using the counter
-	nonce := make([]byte, 12)
-	// Use session ID as prefix (first 8 bytes)
-	copy(nonce, []byte(sc.SessionID[:8]))
-	// Use counter for the last 4 bytes
-	nonce[8] = byte(sc.SendCounter >> 24)
-	nonce[9] = byte(sc.SendCounter >> 16)
-	nonce[10] = byte(sc.SendCounter >> 8)
-	nonce[11] = byte(sc.SendCounter)
-
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("error creating GCM: %v", err)
+	// Generate IV (16 bytes for CBC)
+	iv := make([]byte, aes.BlockSize)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return "", fmt.Errorf("error generating IV: %v", err)
 	}
 
-	// SIMPLIFIED: Use no AAD for better compatibility with Python
-	// Previous: aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter))
-	aad := []byte("") // Empty AAD for compatibility
+	// Add PKCS7 padding to plaintext
+	plaintext = pkcs7Pad(plaintext, aes.BlockSize)
 
-	// Log what we're doing
-	fmt.Printf("Using empty AAD for better compatibility with Python\n")
+	// Encrypt with CBC mode
+	mode := cipher.NewCBCEncrypter(block, iv)
+	ciphertext := make([]byte, len(plaintext))
+	mode.CryptBlocks(ciphertext, plaintext)
 
-	// Encrypt the plaintext
-	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
-
-	// Increment the counter
+	// Increment counter
 	sc.SendCounter++
 
-	// Format: base64(nonce) + ":" + base64(ciphertext)
-	encryptedMessage := base64.StdEncoding.EncodeToString(nonce) + ":" +
+	// Format: base64(iv) + ":" + base64(ciphertext)
+	encryptedMessage := base64.StdEncoding.EncodeToString(iv) + ":" +
 		base64.StdEncoding.EncodeToString(ciphertext)
 
 	return encryptedMessage, nil
 }
 
-// DecryptMessage decrypts a message using AES-GCM
+// DecryptMessage decrypts a message using AES-CBC instead of GCM
 func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -376,9 +366,13 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("invalid encrypted message format")
 	}
 
-	nonce, err := base64.StdEncoding.DecodeString(parts[0])
+	// Decode IV and ciphertext
+	iv, err := base64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
-		return nil, fmt.Errorf("error decoding nonce: %v", err)
+		return nil, fmt.Errorf("error decoding IV: %v", err)
+	}
+	if len(iv) != aes.BlockSize {
+		return nil, fmt.Errorf("invalid IV length: %d", len(iv))
 	}
 
 	ciphertext, err := base64.StdEncoding.DecodeString(parts[1])
@@ -386,32 +380,59 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("error decoding ciphertext: %v", err)
 	}
 
-	// Create AES-GCM cipher
+	// Create AES cipher
 	block, err := aes.NewCipher(sc.DecryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("error creating cipher: %v", err)
 	}
 
-	// Create GCM mode
-	gcm, err := cipher.NewGCM(block)
+	// Decrypt with CBC mode
+	mode := cipher.NewCBCDecrypter(block, iv)
+	plaintext := make([]byte, len(ciphertext))
+	mode.CryptBlocks(plaintext, ciphertext)
+
+	// Remove PKCS7 padding
+	plaintext, err = pkcs7Unpad(plaintext, aes.BlockSize)
 	if err != nil {
-		return nil, fmt.Errorf("error creating GCM: %v", err)
+		return nil, fmt.Errorf("error removing padding: %v", err)
 	}
 
-	// SIMPLIFIED: Use no AAD for better compatibility with Python
-	// Previous: aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.ReceiveCounter))
-	aad := []byte("") // Empty AAD for compatibility
-
-	// Decrypt the ciphertext
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
-	if err != nil {
-		return nil, fmt.Errorf("error decrypting message: %v", err)
-	}
-
-	// Increment the counter
+	// Increment counter
 	sc.ReceiveCounter++
 
 	return plaintext, nil
+}
+
+// Helper function for PKCS7 padding
+func pkcs7Pad(data []byte, blockSize int) []byte {
+	padding := blockSize - (len(data) % blockSize)
+	padtext := bytes.Repeat([]byte{byte(padding)}, padding)
+	return append(data, padtext...)
+}
+
+// Helper function for PKCS7 unpadding
+func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
+	length := len(data)
+	if length == 0 {
+		return nil, fmt.Errorf("empty data")
+	}
+	if length%blockSize != 0 {
+		return nil, fmt.Errorf("data is not a multiple of the block size")
+	}
+
+	padding := int(data[length-1])
+	if padding > blockSize || padding == 0 {
+		return nil, fmt.Errorf("invalid padding size")
+	}
+
+	// Verify padding is correct
+	for i := length - padding; i < length; i++ {
+		if data[i] != byte(padding) {
+			return nil, fmt.Errorf("invalid padding")
+		}
+	}
+
+	return data[:length-padding], nil
 }
 
 // In secure_channel.go, update the SendEncrypted method:

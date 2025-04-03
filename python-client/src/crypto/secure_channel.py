@@ -244,48 +244,49 @@ class SecureChannel:
             return False
     
     def encrypt_message(self, plaintext):
-        """Encrypt a message using AES-GCM"""
+        """Encrypt a message using AES-CBC instead of GCM"""
         if not self.established or not self.encryption_key:
             logger.error("Secure channel not established")
             return None
         
         try:
-            # Generate a nonce using the counter (12 bytes)
-            # We use a combination of session ID and counter to ensure uniqueness
-            nonce = self.session_id[:8].encode('utf-8') + self.send_counter.to_bytes(4, byteorder='big')
+            # Generate IV (16 bytes for CBC)
+            iv = os.urandom(16)
             
-            # Create an encryptor
+            # Create AES-CBC cipher
+            from cryptography.hazmat.primitives.padding import PKCS7
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            
+            # Add PKCS7 padding
+            padder = PKCS7(algorithms.AES.block_size).padder()
+            padded_data = padder.update(plaintext) + padder.finalize()
+            
+            # Encrypt with AES-CBC
             encryptor = Cipher(
                 algorithms.AES(self.encryption_key),
-                modes.GCM(nonce),
+                modes.CBC(iv),
                 backend=default_backend()
             ).encryptor()
             
-            # Add associated data (AAD) for authentication
-            aad = f"{self.peer_id}:{self.session_id}:{self.send_counter}".encode('utf-8')
-            encryptor.authenticate_additional_data(aad)
+            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
             
-            # Encrypt the plaintext
-            ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-            
-            # Get the tag
-            tag = encryptor.tag
-            
-            # Increment the counter
+            # Increment counter
             self.send_counter += 1
             
-            # Format: base64(nonce) + ":" + base64(ciphertext) + ":" + base64(tag)
-            encrypted_message = base64.b64encode(nonce).decode('utf-8') + ":" + \
-                               base64.b64encode(ciphertext).decode('utf-8') + ":" + \
-                               base64.b64encode(tag).decode('utf-8')
+            # Format: base64(iv) + ":" + base64(ciphertext)
+            encrypted_message = base64.b64encode(iv).decode('utf-8') + ":" + \
+                            base64.b64encode(ciphertext).decode('utf-8')
             
             return encrypted_message
             
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-GCM, compatible with Go's implementation"""
+        """Decrypt a message using AES-CBC instead of GCM"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
@@ -297,77 +298,39 @@ class SecureChannel:
                 logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
                 return None
                 
-            # Extract nonce from first part
-            nonce = base64.b64decode(parts[0])
-            if len(nonce) != 12:
-                logger.error(f"Invalid nonce length: {len(nonce)}, expected 12")
+            # Extract IV from first part
+            iv = base64.b64decode(parts[0])
+            if len(iv) != 16:  # CBC uses 16-byte IV
+                logger.error(f"Invalid IV length: {len(iv)}, expected 16")
                 return None
                 
-            # Extract combined ciphertext+tag from second part
-            ciphertext_with_tag = base64.b64decode(parts[1])
-            logger.info(f"Combined ciphertext+tag length: {len(ciphertext_with_tag)}")
+            # Extract ciphertext from second part
+            ciphertext = base64.b64decode(parts[1])
             
-            # Instead of trying to separate ciphertext and tag, use the Go approach
-            # In Go, the Open function handles the combined data differently than Python
+            # Create AES-CBC cipher
+            from cryptography.hazmat.primitives.padding import PKCS7
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
             
-            # Instead of trying to split the tag, use a completely different approach
-            # Create a new GCM cipher and manually decrypt
+            # Decrypt with AES-CBC
+            decryptor = Cipher(
+                algorithms.AES(self.decryption_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            ).decryptor()
             
-            logger.info("Trying direct decryption with AES-GCM...")
+            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
             
-            # Create AES cipher
-            block = algorithms.AES(self.decryption_key)
+            # Remove PKCS7 padding
+            unpadder = PKCS7(algorithms.AES.block_size).unpadder()
+            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
             
-            # Try to work around the different implementations
-            try:
-                # Using the Cipher interface directly
-                cipher = Cipher(block, modes.GCM(nonce), backend=default_backend())
-                decryptor = cipher.decryptor()
-                
-                # Use empty AAD
-                decryptor.authenticate_additional_data(b"")
-                
-                # Separate the tag (last 16 bytes) from the ciphertext
-                if len(ciphertext_with_tag) <= 16:
-                    logger.error("Ciphertext too short")
-                    return None
-                    
-                tag_size = 16  # Standard GCM tag size
-                ciphertext = ciphertext_with_tag[:-tag_size]
-                tag = ciphertext_with_tag[-tag_size:]
-                
-                logger.info(f"Attempting decryption with tag separated: ciphertext={len(ciphertext)}B, tag={len(tag)}B")
-                
-                # Since we're using GCM, we need to include the tag in the decryption
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize_with_tag(tag)
-                
-                logger.info("Decryption successful!")
-                self.receive_counter += 1
-                return plaintext
-                
-            except Exception as e:
-                logger.error(f"Direct decryption failed: {e}")
-                
-                # Let's try a different approach - using a custom wrapper
-                try:
-                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                    
-                    # Create an AESGCM object
-                    aesgcm = AESGCM(self.decryption_key)
-                    
-                    # Attempt to decrypt with empty AAD
-                    plaintext = aesgcm.decrypt(nonce, ciphertext_with_tag, b"")
-                    
-                    logger.info("AESGCM decryption successful!")
-                    self.receive_counter += 1
-                    return plaintext
-                    
-                except Exception as e2:
-                    logger.error(f"AESGCM decryption failed: {e2}")
-                    return None
-                    
+            # Increment counter
+            self.receive_counter += 1
+            
+            return plaintext
+            
         except Exception as e:
-            logger.error(f"Error in decrypt_message: {e}")
+            logger.error(f"Error decrypting message: {e}")
             import traceback
             traceback.print_exc()
             return None
