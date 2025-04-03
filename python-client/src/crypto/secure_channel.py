@@ -285,20 +285,20 @@ class SecureChannel:
             logger.debug(f"Received encrypted message with {len(parts)} parts")
             
             if len(parts) == 2:
-                # Go client format: nonce:ciphertext 
-                # The tag is actually the last 16 bytes of the ciphertext
+                # Go client format: nonce:ciphertext_with_tag
+                # In Go's GCM implementation, the tag is the LAST 16 bytes of the ciphertext
                 nonce_b64, combined_b64 = parts
                 nonce = base64.b64decode(nonce_b64)
                 combined = base64.b64decode(combined_b64)
                 
-                # In GCM, the tag is typically 16 bytes
+                # The GCM tag is 16 bytes and is at the end of the combined data
                 if len(combined) < 16:
                     logger.error("Ciphertext too short to contain authentication tag")
                     return None
                     
-                # Extract the tag from the end of the ciphertext
-                tag = combined[-16:]  # Last 16 bytes are the tag
+                # In Go's cipher.NewGCM().Seal implementation, the tag is appended to the ciphertext
                 ciphertext = combined[:-16]  # Everything except the last 16 bytes
+                tag = combined[-16:]  # Last 16 bytes are the tag
                 
                 logger.debug(f"Extracted tag from ciphertext. Ciphertext len: {len(ciphertext)}, Tag len: {len(tag)}")
                 
