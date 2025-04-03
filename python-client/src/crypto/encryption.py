@@ -15,66 +15,47 @@ logger = logging.getLogger(__name__)
 def generate_key():
     """Generate a random 32-byte key for AES-256"""
     return Fernet.generate_key()
-
 def encrypt(data, key):
-    """
-    Encrypt data using AES-GCM
+    """Encrypt data using AES-GCM"""
+    # Generate a random 96-bit IV (nonce)
+    iv = os.urandom(12)
     
-    Args:
-        data: Bytes to encrypt
-        key: 32-byte key
-        
-    Returns:
-        Encrypted bytes (nonce + ciphertext + tag)
-    """
-    try:
-        # Initialize Fernet with the key
-        if isinstance(key, str):
-            key = key.encode('utf-8')
-            
-        # If key is not 32 bytes (256 bits), derive a proper key
-        if len(key) != 32:
-            key = derive_key(key, None, 32)
-            
-        # Convert to urlsafe base64 if not already in Fernet format
-        if not key.startswith(b'dGhpcw'):  # Check if it begins with base64 pattern
-            key = base64.urlsafe_b64encode(key)
-            
-        f = Fernet(key)
-        return f.encrypt(data)
-    except Exception as e:
-        logger.error(f"Encryption error: {e}")
-        raise
+    # Create encryptor
+    cipher = Cipher(
+        algorithms.AES(key),
+        modes.GCM(iv),
+        backend=default_backend()
+    )
+    encryptor = cipher.encryptor()
+    
+    # Encrypt the data
+    ciphertext = encryptor.update(data) + encryptor.finalize()
+    
+    # Combine IV, ciphertext, and tag for storage or transmission
+    return iv + encryptor.tag + ciphertext
 
 def decrypt(encrypted_data, key):
-    """
-    Decrypt data using AES-GCM
+    """Decrypt data using AES-GCM"""
+    # Extract IV, tag, and ciphertext
+    iv = encrypted_data[:12]
+    tag = encrypted_data[12:28]  # GCM tag is 16 bytes
+    ciphertext = encrypted_data[28:]
     
-    Args:
-        encrypted_data: Encrypted bytes (nonce + ciphertext + tag)
-        key: 32-byte key
-        
-    Returns:
-        Decrypted bytes
-    """
-    try:
-        # Initialize Fernet with the key
-        if isinstance(key, str):
-            key = key.encode('utf-8')
-            
-        # If key is not 32 bytes (256 bits), derive a proper key
-        if len(key) != 32:
-            key = derive_key(key, None, 32)
-            
-        # Convert to urlsafe base64 if not already in Fernet format
-        if not key.startswith(b'dGhpcw'):  # Check if it begins with base64 pattern
-            key = base64.urlsafe_b64encode(key)
-            
-        f = Fernet(key)
-        return f.decrypt(encrypted_data)
-    except Exception as e:
-        logger.error(f"Decryption error: {e}")
-        raise
+    # Create decryptor
+    cipher = Cipher(
+        algorithms.AES(key),
+        modes.GCM(iv, tag),
+        backend=default_backend()
+    )
+    decryptor = cipher.decryptor()
+    
+    # Decrypt the data
+    return decryptor.update(ciphertext) + decryptor.finalize()
+
+def generate_key():
+    """Generate a random 256-bit key for AES"""
+    return os.urandom(32)  # 32 bytes = 256 bits
+
 
 def encrypt_file(file_path, output_path=None, passphrase=None):
     """

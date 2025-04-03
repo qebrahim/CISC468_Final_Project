@@ -13,64 +13,45 @@ import (
 	"strings"
 )
 
-// Encrypt encrypts the provided data using AES-GCM with the given key
+// Encrypt encrypts data using AES-GCM with the provided key
 func Encrypt(data []byte, key []byte) ([]byte, error) {
-	// Generate a 32-byte key if key is not 32 bytes
-	if len(key) != 32 {
-		key = deriveKey(key, nil, 32)
-	}
-
-	// Create a new cipher block from the key
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a new GCM cipher mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
 
-	// Generate a nonce (Number used ONCE)
 	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
 
-	// Seal will encrypt and authenticate the data
+	// Encrypt and seal the data
 	ciphertext := gcm.Seal(nonce, nonce, data, nil)
 	return ciphertext, nil
 }
 
-// Decrypt decrypts the provided ciphertext using AES-GCM with the given key
+// Decrypt decrypts data using AES-GCM with the provided key
 func Decrypt(encryptedData []byte, key []byte) ([]byte, error) {
-	// Generate a 32-byte key if key is not 32 bytes
-	if len(key) != 32 {
-		key = deriveKey(key, nil, 32)
-	}
-
-	// Create a new cipher block from the key
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create a new GCM cipher mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, err
 	}
 
-	// Verify the ciphertext is at least as long as the nonce
 	if len(encryptedData) < gcm.NonceSize() {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 
-	// Extract the nonce from the ciphertext
 	nonce, ciphertext := encryptedData[:gcm.NonceSize()], encryptedData[gcm.NonceSize():]
-
-	// Decrypt and authenticate the data
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 

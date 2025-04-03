@@ -31,6 +31,19 @@ var authentication *crypto.PeerAuthentication
 // Global server port
 const serverPort = 12345
 
+// Define this at the top of main.go with other global variables
+type SecureFileTransfer struct {
+	Filename    string
+	Path        string
+	Size        int64
+	Received    int
+	Hash        string
+	TransferKey []byte
+	File        *os.File
+}
+
+var secureFileTransfers = make(map[string]*SecureFileTransfer)
+
 func main() {
 	// Initialize
 	connectedPeers = make(map[string]net.Conn)
@@ -1169,10 +1182,18 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 	fileSize := fileInfo.Size()
 	filename := filepath.Base(filePath)
 
-	// Send file header with hash info if available
+	// Generate a random encryption key for this transfer
+	transferKey := make([]byte, 32) // 256-bit key
+	if _, err := rand.Read(transferKey); err != nil {
+		channel.SendEncrypted("ERROR", fmt.Sprintf("ENCRYPTION_FAILED:%s", err.Error()))
+		return
+	}
+
+	// Send file header with hash info and encryption key
 	header := map[string]interface{}{
 		"filename": filename,
 		"size":     fileSize,
+		"key":      base64.StdEncoding.EncodeToString(transferKey), // Send key securely
 	}
 	if fileHash != "" {
 		header["hash"] = fileHash
@@ -1190,14 +1211,14 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 		return
 	}
 
-	// Send file in chunks
+	// Read and encrypt the file in chunks
 	buffer := make([]byte, 4096)
 	bytesSent := 0
 
 	for {
 		bytesRead, err := file.Read(buffer)
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				break
 			}
 			fmt.Printf("Error reading file: %v\n", err)
@@ -1208,11 +1229,20 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 			break
 		}
 
-		// Encode chunk as base64
+		// Encrypt this chunk
+		// Encrypt this chunk
 		chunk := buffer[:bytesRead]
-		chunkB64 := base64.StdEncoding.EncodeToString(chunk)
+		encryptedChunk, err := crypto.Encrypt(chunk, transferKey)
+		if err != nil {
+			fmt.Printf("Error encrypting chunk: %v\n", err)
+			channel.SendEncrypted("ERROR", fmt.Sprintf("ENCRYPTION_FAILED:%s", err.Error()))
+			return
+		}
 
-		// Send the chunk
+		// Encode encrypted chunk as base64
+		chunkB64 := base64.StdEncoding.EncodeToString(encryptedChunk)
+
+		// Send the encrypted chunk
 		err = channel.SendEncrypted("FILE_CHUNK", chunkB64)
 		if err != nil {
 			fmt.Printf("Error sending file chunk: %v\n", err)
@@ -1236,6 +1266,58 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 	}
 
 	fmt.Printf("File %s sent securely\n", filename)
+}
+
+// This function would be part of the secure channel message handling in main.go
+func handleSecureFileTransfer(peerID string, messageType string, payload string) {
+	// Access the global transfer state map
+	if messageType == "FILE_CHUNK" {
+		// Process a file chunk
+		transfer, exists := secureFileTransfers[peerID]
+		if !exists {
+			fmt.Printf("No active file transfer for peer %s\n", peerID)
+			return
+		}
+
+		// Decode the chunk
+		encryptedChunkB64 := payload
+		encryptedChunk, err := base64.StdEncoding.DecodeString(encryptedChunkB64)
+		if err != nil {
+			fmt.Printf("Error decoding file chunk: %v\n", err)
+			return
+		}
+		var chunk []byte
+		// Decrypt the chunk if we have an encryption key
+		if transfer.TransferKey != nil {
+			chunk, err := crypto.Decrypt(encryptedChunk, transfer.TransferKey)
+			if err != nil {
+				fmt.Printf("Error decrypting file chunk: %v\n", err)
+				return
+			}
+
+			// Write decrypted chunk to file
+			_, err = transfer.File.Write(chunk)
+			if err != nil {
+				fmt.Printf("Error writing file chunk: %v\n", err)
+				return
+			}
+		} else {
+			// No encryption key, write directly (backwards compatibility)
+			_, err = transfer.File.Write(encryptedChunk)
+			if err != nil {
+				fmt.Printf("Error writing file chunk: %v\n", err)
+				return
+			}
+		}
+
+		transfer.Received += len(chunk)
+
+		// Display progress
+		percentComplete := float64(transfer.Received) / float64(transfer.Size) * 100
+		if transfer.Received%40960 == 0 { // Log every ~40KB
+			fmt.Printf("Receiving (secure): %.1f%%\n", percentComplete)
+		}
+	}
 }
 
 func handleListFilesRequest(conn net.Conn) {
