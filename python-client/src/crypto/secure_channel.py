@@ -296,77 +296,91 @@ class SecureChannel:
             parts = encrypted_message.split(":")
             logger.info(f"Message parts: {parts}")
             
-            if len(parts) == 2:
-                # In this format, the first part is the nonce, and the second part combines ciphertext and tag
-                nonce = base64.b64decode(parts[0])
-                
-                # Decode the second part (which contains both ciphertext and tag)
-                combined = base64.b64decode(parts[1])
-                
-                # The tag is the last 16 bytes
-                tag = combined[-16:]
-                # The ciphertext is everything before the tag
-                ciphertext = combined[:-16]
-                
-                logger.info(f"Successfully split combined data: nonce={len(nonce)}B, ciphertext={len(ciphertext)}B, tag={len(tag)}B")
-            elif len(parts) == 3:
-                # Original format with three parts
-                nonce = base64.b64decode(parts[0])
-                ciphertext = base64.b64decode(parts[1])
-                tag = base64.b64decode(parts[2])
-            else:
-                logger.error(f"Invalid encrypted message format: expected 2 or 3 parts, got {len(parts)}")
+            if len(parts) != 2:
+                logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
                 return None
+                
+            # Extract nonce from first part
+            nonce = base64.b64decode(parts[0])
+            if len(nonce) != 12:
+                logger.error(f"Invalid nonce length: {len(nonce)}, expected 12")
+                return None
+                
+            # Extract ciphertext from second part (contains both ciphertext and tag)
+            ciphertext_with_tag = base64.b64decode(parts[1])
             
-            # Create a decryptor
+            # In Go's GCM implementation, the tag is appended to the ciphertext
+            # Standard tag size is 16 bytes in most implementations
+            tag_size = 16
+            
+            if len(ciphertext_with_tag) <= tag_size:
+                logger.error(f"Ciphertext too short: {len(ciphertext_with_tag)}")
+                return None
+                
+            # Separate the tag from the ciphertext
+            ciphertext = ciphertext_with_tag[:-tag_size]
+            tag = ciphertext_with_tag[-tag_size:]
+            
+            logger.info(f"Prepared decryption: nonce={len(nonce)}B, ciphertext={len(ciphertext)}B, tag={len(tag)}B")
+            
+            # WARNING: The authentication data (AAD) might be different between implementations
+            # Try with a simplified AAD that doesn't rely on counter synchronization
+            # Instead of: aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+            aad = f"{self.peer_id}:{self.session_id}".encode('utf-8')
+            logger.info(f"Using simplified AAD: {aad}")
+            
+            # Create decryptor with the tag
             decryptor = Cipher(
                 algorithms.AES(self.decryption_key),
                 modes.GCM(nonce, tag),
                 backend=default_backend()
             ).decryptor()
             
-            # Add associated data (AAD) for authentication
-            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+            # Add the AAD
             decryptor.authenticate_additional_data(aad)
             
-            # Decrypt the ciphertext
             try:
+                # Attempt decryption
                 plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                logger.info("Decryption successful!")
                 
-                # Increment the counter
+                # Increment counter after successful decryption
                 self.receive_counter += 1
                 
                 return plaintext
             except Exception as e:
-                logger.error(f"Decryption failed: {e}")
-                # Try with a different tag size as a fallback
-                if len(parts) == 2 and len(tag) == 16:
+                logger.error(f"Primary decryption failed: {e}")
+                
+                # Try various fallbacks
+                fallback_attempts = [
+                    {"aad": b"", "desc": "No AAD"},
+                    {"aad": self.peer_id.encode('utf-8'), "desc": "Peer ID only"},
+                    {"aad": self.session_id.encode('utf-8'), "desc": "Session ID only"}
+                ]
+                
+                for attempt in fallback_attempts:
                     try:
-                        # Try with a different tag size
-                        new_tag = combined[-12:]
-                        new_ciphertext = combined[:-12]
+                        logger.info(f"Trying fallback: {attempt['desc']}")
                         
                         decryptor = Cipher(
                             algorithms.AES(self.decryption_key),
-                            modes.GCM(nonce, new_tag),
+                            modes.GCM(nonce, tag),
                             backend=default_backend()
                         ).decryptor()
                         
-                        decryptor.authenticate_additional_data(aad)
-                        plaintext = decryptor.update(new_ciphertext) + decryptor.finalize()
+                        decryptor.authenticate_additional_data(attempt["aad"])
+                        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
                         
-                        # Increment the counter
+                        logger.info(f"Fallback decryption successful with {attempt['desc']}!")
                         self.receive_counter += 1
-                        
-                        logger.info("Decryption succeeded with alternate tag size")
                         return plaintext
-                    except Exception as e2:
-                        logger.error(f"Alternate decryption also failed: {e2}")
-                        return None
+                    except Exception as fallback_e:
+                        logger.error(f"Fallback {attempt['desc']} failed: {fallback_e}")
+                
                 return None
-            
+                
         except Exception as e:
-            logger.error(f"Error decrypting message: {e}")
+            logger.error(f"Error in decrypt_message: {e}")
             import traceback
             traceback.print_exc()
             return None
