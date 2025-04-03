@@ -635,37 +635,54 @@ def encrypt_file(input_file, output_file, key):
         logger.error(f"Error encrypting file: {e}")
         return False
 
-def decrypt_file(input_file, output_file, key):
-    """Decrypt a file using AES-GCM"""
+def decrypt_message(self, encrypted_message):
+    """Decrypt a message using AES-GCM"""
+    if not self.established or not self.decryption_key:
+        logger.error("Secure channel not established")
+        return None
+    
     try:
-        # Read the encrypted file
-        with open(input_file, 'rb') as f:
-            # First 12 bytes are IV
-            iv = f.read(12)
-            # Next 16 bytes are tag
-            tag = f.read(16)
-            # Rest is ciphertext
-            ciphertext = f.read()
+        # Parse the encrypted message
+        parts = encrypted_message.split(":")
+        if len(parts) != 2:
+            logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
+            return None
+        
+        # The first part is the base64-encoded nonce
+        nonce = base64.b64decode(parts[0])
+        
+        # The second part is the base64-encoded ciphertext+tag
+        encrypted_data = base64.b64decode(parts[1])
+        
+        # In AES-GCM, the tag is typically the last 16 bytes
+        ciphertext = encrypted_data[:-16]
+        tag = encrypted_data[-16:]
         
         # Create a decryptor
-        decryptor = Cipher(
-            algorithms.AES(key),
-            modes.GCM(iv, tag),
+        cipher = Cipher(
+            algorithms.AES(self.decryption_key),
+            modes.GCM(nonce, tag),
             backend=default_backend()
-        ).decryptor()
+        )
+        decryptor = cipher.decryptor()
         
-        # Decrypt the file
+        # Add associated data (AAD) for authentication if your Go code uses it
+        aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+        decryptor.authenticate_additional_data(aad)
+        
+        # Decrypt the ciphertext
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         
-        # Write the decrypted data to output file
-        with open(output_file, 'wb') as f:
-            f.write(plaintext)
+        # Increment the counter
+        self.receive_counter += 1
         
-        return True
+        return plaintext
         
     except Exception as e:
-        logger.error(f"Error decrypting file: {e}")
-        return False
+        logger.error(f"Error decrypting message: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # Utility function to establish a secure channel with a peer
 def establish_secure_channel(peer_id, peer_addr):
