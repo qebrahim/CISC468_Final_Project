@@ -182,11 +182,15 @@ func GetPublicKeyPEM(key *rsa.PublicKey) string {
 
 // SignMessage signs a message with the private key
 func SignMessage(key *rsa.PrivateKey, message string) (string, error) {
+	fmt.Printf("DEBUG GO - Raw message bytes (hex): %x\n", []byte(message))
 	msgHash := sha256.Sum256([]byte(message))
+	fmt.Printf("DEBUG GO - Message hash (hex): %x\n", msgHash[:])
+
 	signature, err := rsa.SignPSS(rand.Reader, key, crypto.SHA256, msgHash[:], nil)
 	if err != nil {
 		return "", err
 	}
+
 	return base64.StdEncoding.EncodeToString(signature), nil
 }
 
@@ -203,11 +207,18 @@ func (km *KeyMigration) NotifyContacts() error {
 	migrationTime := float64(time.Now().Unix())
 	message := fmt.Sprintf("KEY_MIGRATION:%s:%f", km.PeerID, migrationTime)
 
+	// Add more detailed logging for debugging
+
+	fmt.Printf("DEBUG GO - Message to sign: %s\n", message)
+
 	// Sign the message with the old private key
 	signature, err := SignMessage(km.OldPrivateKey, message)
 	if err != nil {
 		return fmt.Errorf("error signing migration message: %v", err)
 	}
+
+	fmt.Printf("DEBUG GO - Base64 signature: %s\n", signature)
+	fmt.Printf("DEBUG GO - Old public key: %s\n", GetPublicKeyPEM(km.OldPublicKey))
 
 	// Create notification payload
 	notification := MigrationNotification{

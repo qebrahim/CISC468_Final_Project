@@ -259,6 +259,14 @@ def handle_key_migration(message, addr, conn, contact_manager, authentication):
         new_public_key = notification.get("new_public_key")
         signature = notification.get("signature")
         migration_time = notification.get("migration_time")
+
+        # Add more detailed logging for debugging
+        message_text = f"KEY_MIGRATION:{peer_id}:{migration_time}"
+        print(f"DEBUG PYTHON - Message to verify: {message_text}")
+        print(f"DEBUG PYTHON - Message bytes (hex): {message_text.encode('utf-8').hex()}")
+        print(f"DEBUG PYTHON - Base64 signature: {signature}")
+        print(f"DEBUG PYTHON - Raw signature (hex): {base64.b64decode(signature).hex()}")
+        print(f"DEBUG PYTHON - Public key first 50 chars: {old_public_key[:50]}...")
         
         if not peer_id or not old_public_key or not new_public_key or not signature or not migration_time:
             logger.error("Invalid key migration notification")
@@ -324,32 +332,61 @@ def verify_migration_signature(message, signature_b64, public_key_pem):
     try:
         # Convert message to bytes if it's a string
         if isinstance(message, str):
-            message = message.encode('utf-8')
+            message_bytes = message.encode('utf-8')
+        else:
+            message_bytes = message
+            
+        print(f"DEBUG PYTHON - Raw message bytes (hex): {message_bytes.hex()}")
         
-        # Pre-hash the message to match Go implementation
-        message_hash = hashlib.sha256(message).digest()
+        # Calculate the hash like Go does
+        message_hash = hashlib.sha256(message_bytes).digest()
+        print(f"DEBUG PYTHON - Message hash (hex): {message_hash.hex()}")
         
         # Decode the signature
         signature = base64.b64decode(signature_b64)
+        print(f"DEBUG PYTHON - Signature length: {len(signature)}")
         
         # Load the public key
         public_key = serialization.load_pem_public_key(
             public_key_pem.encode('utf-8')
         )
         
-        # Verify the signature on the pre-hashed message
-        public_key.verify(
-            signature,
-            message_hash,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            # No hash algorithm here since we pre-hashed the message
-            utils.Prehashed(hashes.SHA256())
-        )
-        
-        return True
+        # Try both methods to verify
+        try:
+            # Method 1: Original method (expecting the verify function to hash)
+            print("DEBUG PYTHON - Trying verification method 1 (internal hashing)")
+            public_key.verify(
+                signature,
+                message_bytes,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            print("DEBUG PYTHON - Method 1 succeeded!")
+            return True
+        except Exception as e1:
+            print(f"DEBUG PYTHON - Method 1 failed: {e1}")
+            
+            try:
+                # Method 2: Pre-hashed method (matching Go's approach)
+                print("DEBUG PYTHON - Trying verification method 2 (pre-hashed)")
+                public_key.verify(
+                    signature,
+                    message_hash,
+                    padding.PSS(
+                        mgf=padding.MGF1(hashes.SHA256()),
+                        salt_length=padding.PSS.MAX_LENGTH
+                    ),
+                    utils.Prehashed(hashes.SHA256())
+                )
+                print("DEBUG PYTHON - Method 2 succeeded!")
+                return True
+            except Exception as e2:
+                print(f"DEBUG PYTHON - Method 2 failed: {e2}")
+                raise e2
+                
     except InvalidSignature:
         logger.warning("Invalid signature in migration verification")
         return False
