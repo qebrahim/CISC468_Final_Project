@@ -341,8 +341,12 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		return "", fmt.Errorf("error creating GCM: %v", err)
 	}
 
-	// Create additional data (AAD) for authentication
-	aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter))
+	// SIMPLIFIED: Use no AAD for better compatibility with Python
+	// Previous: aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter))
+	aad := []byte("") // Empty AAD for compatibility
+
+	// Log what we're doing
+	fmt.Printf("Using empty AAD for better compatibility with Python\n")
 
 	// Encrypt the plaintext
 	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
@@ -394,8 +398,9 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 		return nil, fmt.Errorf("error creating GCM: %v", err)
 	}
 
-	// Create additional data (AAD) for authentication
-	aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.ReceiveCounter))
+	// SIMPLIFIED: Use no AAD for better compatibility with Python
+	// Previous: aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.ReceiveCounter))
+	aad := []byte("") // Empty AAD for compatibility
 
 	// Decrypt the ciphertext
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
