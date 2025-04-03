@@ -285,15 +285,22 @@ class SecureChannel:
             logger.debug(f"Received encrypted message with {len(parts)} parts")
             
             if len(parts) == 2:
-                # Go client format: nonce:ciphertext
-                nonce_b64, ciphertext_b64 = parts
+                # Go client format: nonce:ciphertext 
+                # The tag is actually the last 16 bytes of the ciphertext
+                nonce_b64, combined_b64 = parts
                 nonce = base64.b64decode(nonce_b64)
-                ciphertext = base64.b64decode(ciphertext_b64)
+                combined = base64.b64decode(combined_b64)
                 
-                # Create a decryptor without explicit tag
-                aes = algorithms.AES(self.decryption_key)
-                cipher = Cipher(aes, modes.GCM(nonce), backend=default_backend())
-                decryptor = cipher.decryptor()
+                # In GCM, the tag is typically 16 bytes
+                if len(combined) < 16:
+                    logger.error("Ciphertext too short to contain authentication tag")
+                    return None
+                    
+                # Extract the tag from the end of the ciphertext
+                tag = combined[-16:]  # Last 16 bytes are the tag
+                ciphertext = combined[:-16]  # Everything except the last 16 bytes
+                
+                logger.debug(f"Extracted tag from ciphertext. Ciphertext len: {len(ciphertext)}, Tag len: {len(tag)}")
                 
             elif len(parts) == 3:
                 # Python client format: nonce:ciphertext:tag
@@ -302,14 +309,14 @@ class SecureChannel:
                 ciphertext = base64.b64decode(ciphertext_b64)
                 tag = base64.b64decode(tag_b64)
                 
-                # Create a decryptor with explicit tag
-                aes = algorithms.AES(self.decryption_key)
-                cipher = Cipher(aes, modes.GCM(nonce, tag), backend=default_backend())
-                decryptor = cipher.decryptor()
-                
             else:
                 logger.error(f"Invalid encrypted message format: {len(parts)} parts")
                 return None
+            
+            # Create a decryptor with explicit tag
+            aes = algorithms.AES(self.decryption_key)
+            cipher = Cipher(aes, modes.GCM(nonce, tag), backend=default_backend())
+            decryptor = cipher.decryptor()
             
             # Add associated data (AAD) for authentication
             aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
