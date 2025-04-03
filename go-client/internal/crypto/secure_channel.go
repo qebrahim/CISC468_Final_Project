@@ -26,8 +26,8 @@ type SecureChannel struct {
 	IsInitiator    bool
 	Established    bool
 	SessionID      string
-	ECDSAPrivKey   *ecdsa.PrivateKey // Using ECDSA instead of ECDH
-	ECDSAPubKey    *ecdsa.PublicKey  // Using ECDSA instead of ECDH
+	PrivateKey     *ecdh.PrivateKey // Switch back to ECDH for Python compatibility
+	PeerPublicKey  *ecdh.PublicKey  // Switch back to ECDH for Python compatibility
 	EncryptionKey  []byte
 	DecryptionKey  []byte
 	SendCounter    uint32
@@ -44,20 +44,21 @@ var (
 // In NewSecureChannel function in secure_channel.go
 // NewSecureChannel creates a new secure channel
 func NewSecureChannel(peerID string, conn net.Conn, isInitiator bool) (*SecureChannel, error) {
-	// Generate key pair - use crypto/x509 for compatibility with Python's cryptography
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// Generate key pair using ECDH for compatibility with Python's cryptography
+	curve := ecdh.P256()
+	privateKey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("error generating ephemeral key: %v", err)
 	}
 
 	sc := &SecureChannel{
-		PeerID:       peerID,
-		Conn:         conn,
-		IsInitiator:  isInitiator,
-		ECDSAPrivKey: privateKey,
-		Established:  false,
-		SessionID:    "",
-		mutex:        sync.Mutex{},
+		PeerID:      peerID,
+		Conn:        conn,
+		IsInitiator: isInitiator,
+		PrivateKey:  privateKey,
+		Established: false,
+		SessionID:   "",
+		mutex:       sync.Mutex{},
 	}
 
 	return sc, nil
@@ -73,7 +74,7 @@ func (sc *SecureChannel) InitiateKeyExchange() error {
 	sc.SessionID = fmt.Sprintf("%x", sessionIDBytes)
 
 	// Format public key in a way that's compatible with Python's cryptography library
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&sc.ECDSAPrivKey.PublicKey)
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(sc.PrivateKey.PublicKey())
 	if err != nil {
 		return fmt.Errorf("error marshaling public key: %v", err)
 	}
@@ -111,7 +112,6 @@ func (sc *SecureChannel) InitiateKeyExchange() error {
 	return nil
 }
 
-// HandleKeyExchange processes a key exchange message from a peer
 func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) error {
 	// Extract peer ID, session ID, and public key
 	peerID, ok := exchangeData["peer_id"].(string)
@@ -148,18 +148,32 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 		return fmt.Errorf("error parsing public key: %v", err)
 	}
 
-	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("public key is not an ECDSA key")
+	// Handle both EC and ECDH public keys
+	// In both HandleKeyExchange and HandleExchangeResponse:
+	var ecdhPubKey *ecdh.PublicKey
+	switch p := pub.(type) {
+	case *ecdh.PublicKey:
+		ecdhPubKey = p
+	case *ecdsa.PublicKey:
+		// ECDSA keys can be used with ECDH directly if they're on the right curve
+		curve := ecdh.P256()
+		rawKey := elliptic.Marshal(p.Curve, p.X, p.Y)
+		ecdhPubKey, err = curve.NewPublicKey(rawKey)
+		if err != nil {
+			return fmt.Errorf("error converting ECDSA key to ECDH format: %v", err)
+		}
+		fmt.Printf("Successfully converted ECDSA key to ECDH format\n")
+	default:
+		return fmt.Errorf("unsupported key type: %T", pub)
 	}
 
-	// Store the parsed ECDSA public key
-	sc.ECDSAPubKey = ecdsaPub
+	// Store the parsed ECDH public key
+	sc.PeerPublicKey = ecdhPubKey
 
 	// If we're the responder, send our public key back
 	if !sc.IsInitiator {
 		// Format our public key as PEM
-		ourPublicKeyBytes, err := x509.MarshalPKIXPublicKey(&sc.ECDSAPrivKey.PublicKey)
+		ourPublicKeyBytes, err := x509.MarshalPKIXPublicKey(sc.PrivateKey.PublicKey())
 		if err != nil {
 			return fmt.Errorf("error marshaling our public key: %v", err)
 		}
@@ -250,17 +264,27 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 		return fmt.Errorf("error parsing public key: %v", err)
 	}
 
-	// Specifically handle both ECDSA and ECDH keys
-	switch key := pub.(type) {
-	case *ecdsa.PublicKey:
-		sc.ECDSAPubKey = key
+	// Handle both EC and ECDH public keys
+	// In both HandleKeyExchange and HandleExchangeResponse:
+	var ecdhPubKey *ecdh.PublicKey
+	switch p := pub.(type) {
 	case *ecdh.PublicKey:
-		// Convert ECDH to ECDSA if needed
-		// You might need to add conversion logic here
-		return fmt.Errorf("unsupported key type: ECDH")
+		ecdhPubKey = p
+	case *ecdsa.PublicKey:
+		// ECDSA keys can be used with ECDH directly if they're on the right curve
+		curve := ecdh.P256()
+		rawKey := elliptic.Marshal(p.Curve, p.X, p.Y)
+		ecdhPubKey, err = curve.NewPublicKey(rawKey)
+		if err != nil {
+			return fmt.Errorf("error converting ECDSA key to ECDH format: %v", err)
+		}
+		fmt.Printf("Successfully converted ECDSA key to ECDH format\n")
 	default:
-		return fmt.Errorf("unexpected public key type: %T", pub)
+		return fmt.Errorf("unsupported key type: %T", pub)
 	}
+
+	// Store the parsed ECDH public key
+	sc.PeerPublicKey = ecdhPubKey
 
 	// Derive shared secret and encryption keys
 	err = sc.DeriveSharedSecret()
@@ -282,16 +306,17 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 
 // DeriveSharedSecret computes the shared secret for encryption
 func (sc *SecureChannel) DeriveSharedSecret() error {
-	// Compute shared secret using ECDH with ECDSA keys
-	// For ECDSA, we use the peer's X,Y coordinates multiplied by our private key to create a shared point
-	xCoord, _ := sc.ECDSAPrivKey.Curve.ScalarMult(
-		sc.ECDSAPubKey.X,
-		sc.ECDSAPubKey.Y,
-		sc.ECDSAPrivKey.D.Bytes(),
-	)
+	// Compute shared secret using ECDH
+	if sc.PeerPublicKey == nil {
+		return fmt.Errorf("peer public key not set")
+	}
 
-	// Use the X coordinate as the shared secret
-	sharedSecret := xCoord.Bytes()
+	sharedSecret, err := sc.PrivateKey.ECDH(sc.PeerPublicKey)
+	if err != nil {
+		return fmt.Errorf("error computing ECDH shared secret: %v", err)
+	}
+
+	fmt.Printf("Computed shared secret for peer %s (length: %d)\n", sc.PeerID, len(sharedSecret))
 
 	// Derive encryption and decryption keys using HKDF-like approach
 	if sc.IsInitiator {
@@ -305,12 +330,10 @@ func (sc *SecureChannel) DeriveSharedSecret() error {
 	}
 
 	// Clear private key for forward secrecy
-	sc.ECDSAPrivKey = nil
+	sc.PrivateKey = nil
 
 	return nil
 }
-
-// EncryptMessage encrypts a message using AES-GCM
 func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -368,6 +391,8 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 
 	// Parse the encrypted message
 	parts := strings.Split(encryptedMessage, ":")
+	fmt.Printf("Decrypt: got %d parts, expecting 2\n", len(parts))
+
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid encrypted message format")
 	}
@@ -473,14 +498,12 @@ func (sc *SecureChannel) Close() {
 	// Clear sensitive data
 	sc.EncryptionKey = nil
 	sc.DecryptionKey = nil
-	sc.ECDSAPrivKey = nil // Changed from PrivateKey
-	sc.ECDSAPubKey = nil  // Changed from PeerPublicKey
+	sc.PrivateKey = nil
+	sc.PeerPublicKey = nil
 
 	sc.Established = false
 	fmt.Printf("Secure channel with peer %s closed\n", sc.PeerID)
 }
-
-// GetSecureChannel gets an existing secure channel for a peer
 func GetSecureChannel(peerID string) *SecureChannel {
 	secureChannelMutex.RLock()
 	defer secureChannelMutex.RUnlock()

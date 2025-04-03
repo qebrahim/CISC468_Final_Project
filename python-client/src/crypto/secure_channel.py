@@ -490,10 +490,20 @@ def handle_secure_message(conn, addr, message):
             # Handle encrypted data
             try:
                 channel = get_secure_channel(peer_id)
+                logger.debug(f"Channel lookup with peer_id: {peer_id}")
+                logger.debug(f"Available secure channels: {list(secure_channels.keys())}")
                 
-                if not channel:
-                    logger.error(f"No secure channel established for peer {peer_id}")
-                    return {"status": "no_secure_channel"}
+                logger.debug(f"Looking for channel with peer_id: {peer_id}")
+                logger.debug(f"Available channels: {list(secure_channels.keys())}")
+
+                # Try alternative lookup methods:
+                if channel is None:
+                    for potential_id, potential_channel in secure_channels.items():
+                        logger.debug(f"Comparing {potential_channel.socket} with {conn}")
+                        if potential_channel.socket == conn:
+                            logger.info(f"Found channel by socket match: {potential_id}")
+                            channel = potential_channel
+                            break
                 
                 # Decrypt and handle the data
                 result = channel.handle_encrypted_data(payload)

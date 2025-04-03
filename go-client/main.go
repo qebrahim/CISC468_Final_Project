@@ -40,6 +40,10 @@ type SecureFileTransfer struct {
 	Hash        string
 	TransferKey []byte
 	File        *os.File
+	// New fields
+	IsComplete bool
+	StartTime  time.Time
+	EndTime    time.Time
 }
 
 var secureFileTransfers = make(map[string]*SecureFileTransfer)
@@ -924,13 +928,37 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		// Check if this is a secure channel message
 		if command == "SECURE" {
 			// Process secure channel message
-			if len(parts) > 1 {
-				_, err := crypto.HandleSecureMessage(conn, peerAddr, message)
-				if err != nil {
-					fmt.Printf("Error handling secure message: %v\n", err)
-				}
+			addr := parts[1]
+			result, err := crypto.HandleSecureMessage(conn, addr, message)
+			if err != nil {
+				fmt.Printf("Error handling secure message: %v\n", err)
+				continue
 			}
-			continue
+			if result != nil && result["status"] == "message_received" {
+				// Get message details
+				messageType, typeOk := result["type"].(string)
+				payload, payloadOk := result["payload"].(string)
+				peerID, peerOk := result["peer_id"].(string)
+
+				if !typeOk || !payloadOk || !peerOk {
+					fmt.Printf("Invalid secure message format\n")
+					continue
+				}
+				if messageType == "REQUEST_FILE" {
+					// Handle file request
+					handleFileRequest(conn, peerAddr, payload)
+				} else if messageType == "LIST_FILES" {
+					// Handle file list request
+					handleListFilesRequest(conn)
+				} else if messageType == "FILE_HEADER" || messageType == "FILE_CHUNK" || messageType == "FILE_END" {
+					// Handle file transfer messages
+					handleSecureFileTransfer(peerID, messageType, payload)
+				} else {
+					fmt.Printf("Unknown secure message type: %s\n", messageType)
+				}
+				continue
+
+			}
 		}
 
 		// For sensitive operations, check if peer is authenticated
@@ -1230,7 +1258,6 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 		}
 
 		// Encrypt this chunk
-		// Encrypt this chunk
 		chunk := buffer[:bytesRead]
 		encryptedChunk, err := crypto.Encrypt(chunk, transferKey)
 		if err != nil {
@@ -1271,52 +1298,178 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 // This function would be part of the secure channel message handling in main.go
 func handleSecureFileTransfer(peerID string, messageType string, payload string) {
 	// Access the global transfer state map
-	if messageType == "FILE_CHUNK" {
+	transfer, exists := secureFileTransfers[peerID]
+
+	if messageType == "FILE_HEADER" {
+		// Process a file header which initiates a new transfer
+		var header map[string]interface{}
+		err := json.Unmarshal([]byte(payload), &header)
+		if err != nil {
+			fmt.Printf("Error parsing file header: %v\n", err)
+			return
+		}
+
+		// Extract information from the header
+		filename, ok := header["filename"].(string)
+		if !ok {
+			fmt.Printf("Missing filename in file header\n")
+			return
+		}
+
+		// Size might be float64 in JSON
+		var fileSize int64
+		switch size := header["size"].(type) {
+		case float64:
+			fileSize = int64(size)
+		case int64:
+			fileSize = size
+		case json.Number:
+			fileSize, _ = size.Int64()
+		default:
+			fmt.Printf("Invalid file size type: %T\n", header["size"])
+			return
+		}
+
+		// Extract optional hash
+		fileHash := ""
+		if hash, ok := header["hash"].(string); ok {
+			fileHash = hash
+		}
+
+		// Extract encryption key if present
+		var transferKey []byte
+		if keyB64, ok := header["key"].(string); ok {
+			transferKey, err = base64.StdEncoding.DecodeString(keyB64)
+			if err != nil {
+				fmt.Printf("Error decoding transfer key: %v\n", err)
+			} else {
+				fmt.Printf("Received encryption key for file transfer (len: %d)\n", len(transferKey))
+			}
+		}
+
+		// Create download directory if needed
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("Error getting home directory: %v\n", err)
+			return
+		}
+		downloadDir := filepath.Join(homeDir, ".p2p-share", "shared")
+		os.MkdirAll(downloadDir, 0755)
+
+		// Create file to save the download
+		filePath := filepath.Join(downloadDir, filename)
+		file, err := os.Create(filePath)
+		if err != nil {
+			fmt.Printf("Error creating file: %v\n", err)
+			return
+		}
+
+		// Initialize transfer object
+		secureFileTransfers[peerID] = &SecureFileTransfer{
+			Filename:    filename,
+			Path:        filePath,
+			Size:        fileSize,
+			Received:    0,
+			Hash:        fileHash,
+			TransferKey: transferKey,
+			File:        file,
+			IsComplete:  false,
+			StartTime:   time.Now(),
+		}
+
+		fmt.Printf("Starting secure file transfer: %s (%d bytes)\n", filename, fileSize)
+
+	} else if messageType == "FILE_CHUNK" {
 		// Process a file chunk
-		transfer, exists := secureFileTransfers[peerID]
 		if !exists {
 			fmt.Printf("No active file transfer for peer %s\n", peerID)
 			return
 		}
 
-		// Decode the chunk
-		encryptedChunkB64 := payload
-		encryptedChunk, err := base64.StdEncoding.DecodeString(encryptedChunkB64)
+		// Decode the base64 chunk
+		encryptedChunk, err := base64.StdEncoding.DecodeString(payload)
 		if err != nil {
 			fmt.Printf("Error decoding file chunk: %v\n", err)
 			return
 		}
+
 		var chunk []byte
 		// Decrypt the chunk if we have an encryption key
 		if transfer.TransferKey != nil {
-			chunk, err := crypto.Decrypt(encryptedChunk, transfer.TransferKey)
+			chunk, err = crypto.Decrypt(encryptedChunk, transfer.TransferKey)
 			if err != nil {
 				fmt.Printf("Error decrypting file chunk: %v\n", err)
 				return
 			}
-
-			// Write decrypted chunk to file
-			_, err = transfer.File.Write(chunk)
-			if err != nil {
-				fmt.Printf("Error writing file chunk: %v\n", err)
-				return
-			}
 		} else {
-			// No encryption key, write directly (backwards compatibility)
-			_, err = transfer.File.Write(encryptedChunk)
-			if err != nil {
-				fmt.Printf("Error writing file chunk: %v\n", err)
-				return
-			}
+			// No encryption key, use raw data (for backward compatibility)
+			chunk = encryptedChunk
+		}
+
+		// Write the chunk to file
+		_, err = transfer.File.Write(chunk)
+		if err != nil {
+			fmt.Printf("Error writing file chunk: %v\n", err)
+			return
 		}
 
 		transfer.Received += len(chunk)
 
 		// Display progress
 		percentComplete := float64(transfer.Received) / float64(transfer.Size) * 100
-		if transfer.Received%40960 == 0 { // Log every ~40KB
+		if transfer.Received%40960 == 0 || transfer.Received >= int(transfer.Size) {
 			fmt.Printf("Receiving (secure): %.1f%%\n", percentComplete)
 		}
+
+	} else if messageType == "FILE_END" {
+		// Process end of file marker
+		if !exists {
+			fmt.Printf("No active file transfer for peer %s\n", peerID)
+			return
+		}
+
+		// Close the file
+		if transfer.File != nil {
+			transfer.File.Close()
+			transfer.File = nil
+		}
+
+		transfer.EndTime = time.Now()
+		transfer.IsComplete = true
+		duration := transfer.EndTime.Sub(transfer.StartTime)
+
+		// Verify the transfer is complete
+		if int64(transfer.Received) < transfer.Size {
+			fmt.Printf("Warning: Incomplete file transfer for %s (%d/%d bytes)\n",
+				transfer.Filename, transfer.Received, transfer.Size)
+		} else {
+			fmt.Printf("File transfer complete: %s (%d bytes in %v)\n",
+				transfer.Filename, transfer.Size, duration)
+		}
+
+		// Verify hash if available
+		if transfer.Hash != "" && hashManager != nil {
+			verified, err := hashManager.VerifyFileHash(transfer.Path, transfer.Hash)
+			if err != nil || !verified {
+				fmt.Printf("File verification failed: %v\n", err)
+			} else {
+				fmt.Printf("File integrity verified successfully\n")
+
+				// Add hash to our database
+				hashManager.AddFileHash(transfer.Filename, transfer.Path, peerID)
+			}
+		}
+
+		// Add to shared files
+		absPath, _ := filepath.Abs(transfer.Path)
+		if !contains(sharedFiles, absPath) {
+			sharedFiles = append(sharedFiles, absPath)
+		}
+
+		// Clean up
+		delete(secureFileTransfers, peerID)
+	} else {
+		fmt.Printf("Unknown secure file message type: %s\n", messageType)
 	}
 }
 
@@ -1401,22 +1554,27 @@ func requestFileFromPeer(host string, port int, filename string, useSecure bool)
 							if response == "ESTABLISH_SECURE:ACCEPTED" {
 								// Establish secure channel
 								result, err := crypto.EstablishSecureChannel(contact.PeerID, standardAddr)
-								if err != nil || result["status"] != "initiated" {
+								if err != nil {
 									fmt.Printf("Error establishing secure channel: %v\n", err)
 									fmt.Println("Falling back to regular connection")
 									useSecure = false
-								} else {
-									// Wait for channel to be established
+								}
+								if result["status"] == "established" {
+									fmt.Println("Secure channel established successfully")
 									time.Sleep(1 * time.Second)
 									secureChannel = crypto.GetSecureChannel(contact.PeerID)
 									if secureChannel == nil || !secureChannel.Established {
-										fmt.Println("Failed to establish secure channel")
+										fmt.Println("Failed to establish secure channel inner")
 										fmt.Println("Falling back to regular connection")
 										useSecure = false
 									} else {
 										fmt.Println("Secure channel established")
 									}
+
+								} else {
+									fmt.Printf("Failed to establish secure channel: %s\n", result["message"])
 								}
+
 							} else {
 								fmt.Println("Peer rejected secure channel request")
 								fmt.Println("Falling back to regular connection")
