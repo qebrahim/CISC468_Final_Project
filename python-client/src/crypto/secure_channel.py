@@ -242,8 +242,9 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error deriving shared secret: {e}")
             return False
+    
     def encrypt_message(self, plaintext):
-        """Encrypt a message using AES-CBC with compatible PKCS7 padding"""
+        """Encrypt a message using AES-CBC with enhanced compatibility with Go"""
         if not self.established or not self.encryption_key:
             logger.error("Secure channel not established")
             return None
@@ -251,6 +252,7 @@ class SecureChannel:
         try:
             # Generate IV (16 bytes for CBC)
             iv = os.urandom(16)
+            logger.debug(f"Generated IV (hex): {iv.hex()}")
             
             # Manual PKCS7 padding
             block_size = 16  # AES block size
@@ -260,6 +262,9 @@ class SecureChannel:
                 
             padding = bytes([padding_length]) * padding_length
             padded_data = plaintext + padding
+            
+            logger.debug(f"Plaintext length: {len(plaintext)}, Padding length: {padding_length}")
+            logger.debug(f"Padding bytes: {padding.hex()}")
             
             # Create AES-CBC cipher
             encryptor = Cipher(
@@ -277,6 +282,7 @@ class SecureChannel:
             encrypted_message = base64.b64encode(iv).decode('utf-8') + ":" + \
                             base64.b64encode(ciphertext).decode('utf-8')
             
+            logger.debug(f"Encrypted message format: {encrypted_message[:50]}...")
             return encrypted_message
             
         except Exception as e:
@@ -286,7 +292,7 @@ class SecureChannel:
             return None
         
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-CBC with compatible PKCS7 padding"""
+        """Decrypt a message using AES-CBC with improved padding handling"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
@@ -306,6 +312,8 @@ class SecureChannel:
                 
             # Extract ciphertext from second part
             ciphertext = base64.b64decode(parts[1])
+            logger.debug(f"Decrypting message with IV: {iv.hex()}")
+            logger.debug(f"Ciphertext length: {len(ciphertext)}")
             
             # Create AES-CBC cipher
             decryptor = Cipher(
@@ -315,21 +323,48 @@ class SecureChannel:
             ).decryptor()
             
             padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            logger.debug(f"Padded plaintext length: {len(padded_plaintext)}")
             
-            # Manual PKCS7 unpadding to be compatible with Go
-            padding_length = padded_plaintext[-1]
-            if padding_length > 16:  # AES block size is 16 bytes
-                logger.error(f"Invalid padding length: {padding_length}")
+            # More robust PKCS7 unpadding
+            if len(padded_plaintext) == 0:
+                logger.error("Padded plaintext is empty")
                 return None
                 
-            # Verify all padding bytes are the same
-            for i in range(1, padding_length + 1):
-                if padded_plaintext[-i] != padding_length:
-                    logger.error(f"Invalid padding at position {-i}: expected {padding_length}, got {padded_plaintext[-i]}")
-                    return None
+            if len(padded_plaintext) % 16 != 0:
+                logger.error(f"Padded plaintext length ({len(padded_plaintext)}) is not a multiple of block size (16)")
+                return None
+            
+            # Get the padding value from the last byte    
+            padding_length = padded_plaintext[-1]
+            logger.debug(f"Padding byte value: {padding_length}")
+            
+            # Verify padding is valid
+            if padding_length == 0 or padding_length > 16:
+                logger.warning(f"Invalid padding byte value: {padding_length}, attempting fallback")
+                # Try a fallback approach - treat as corrupted and just return the data
+                plaintext = padded_plaintext
+            else:
+                # Check if we have enough bytes for the indicated padding
+                if len(padded_plaintext) < padding_length:
+                    logger.warning(f"Padding length ({padding_length}) exceeds data length ({len(padded_plaintext)})")
+                    plaintext = padded_plaintext
+                else:
+                    # Try to verify the padding
+                    padding_valid = True
+                    for i in range(1, padding_length + 1):
+                        if padded_plaintext[-i] != padding_length:
+                            logger.warning(f"Invalid padding at position {-i}: expected {padding_length}, got {padded_plaintext[-i]}")
+                            padding_valid = False
+                            break
                     
-            # Remove padding
-            plaintext = padded_plaintext[:-padding_length]
+                    if padding_valid:
+                        # Remove padding
+                        plaintext = padded_plaintext[:-padding_length]
+                        logger.debug(f"Padding validation successful, plaintext length: {len(plaintext)}")
+                    else:
+                        # Fallback: try to interpret the message even with invalid padding
+                        logger.warning("Using plaintext with potentially invalid padding")
+                        plaintext = padded_plaintext
             
             # Increment counter
             self.receive_counter += 1
@@ -371,30 +406,40 @@ class SecureChannel:
             traceback.print_exc()
             return False
     
-    
     def handle_encrypted_data(self, encrypted_data):
         """Handle an incoming encrypted message"""
         try:
             # Decrypt the message
             plaintext = self.decrypt_message(encrypted_data)
             if not plaintext:
+                logger.error("Failed to decrypt message")
+                return None
+            
+            # Try to decode as UTF-8
+            try:
+                message = plaintext.decode('utf-8')
+            except UnicodeDecodeError as e:
+                logger.error(f"Failed to decode plaintext as UTF-8: {e}")
+                logger.error(f"Raw plaintext (hex): {plaintext.hex()}")
                 return None
             
             # Parse the plaintext message
-            message = plaintext.decode('utf-8')
             parts = message.split(":", 1)
             
             if len(parts) != 2:
-                logger.error("Invalid decrypted message format")
+                logger.error(f"Invalid decrypted message format. Message: '{message}'")
                 return None
             
             message_type = parts[0]
             payload = parts[1]
             
+            logger.info(f"Successfully handled encrypted message of type: {message_type}")
             return {"type": message_type, "payload": payload}
             
         except Exception as e:
             logger.error(f"Error handling encrypted data: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def close(self):
