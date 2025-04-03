@@ -272,69 +272,6 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
             return None
-    def debug_decryption(self, nonce, key, ciphertext, tag, aad):
-        """
-        Comprehensive debugging for AES-GCM decryption
-        
-        Args:
-            nonce (bytes): Initialization vector
-            key (bytes): Encryption key
-            ciphertext (bytes): Encrypted data
-            tag (bytes): Authentication tag
-            aad (bytes): Additional Authenticated Data
-        """
-        import binascii
-        
-        # Logging function with consistent formatting
-        def log_hex(name, data):
-            print(f"{name}: {binascii.hexlify(data).decode()}")
-            print(f"{name} Length: {len(data)} bytes")
-        
-        # Log all input parameters
-        print("AES-GCM Decryption Debug:")
-        log_hex("Nonce", nonce)
-        log_hex("Key", key)
-        log_hex("Ciphertext", ciphertext)
-        log_hex("Tag", tag)
-        log_hex("AAD", aad)
-        
-        # Attempt decryption with detailed error handling
-        try:
-            # Create cipher
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.backends import default_backend
-            
-            cipher = Cipher(
-                algorithms.AES(key), 
-                modes.GCM(nonce, tag), 
-                backend=default_backend()
-            )
-            decryptor = cipher.decryptor()
-            
-            # Authenticate AAD
-            decryptor.authenticate_additional_data(aad)
-            
-            # Attempt decryption
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            
-            print("Decryption Successful!")
-            log_hex("Plaintext", plaintext)
-            return plaintext
-        
-        except Exception as e:
-            print(f"Decryption Failed: {type(e).__name__}")
-            print(f"Error Details: {str(e)}")
-            
-            # Additional diagnostics for common issues
-            if "InvalidTag" in str(e):
-                print("\n--- Tag Validation Failure Diagnostics ---")
-                print("Possible causes:")
-                print("1. Incorrect key")
-                print("2. Corrupted ciphertext")
-                print("3. Incorrect nonce")
-                print("4. Incorrect AAD")
-            
-            return None
     
     def decrypt_message(self, encrypted_message):
         """Decrypt a message using AES-GCM"""
@@ -342,31 +279,49 @@ class SecureChannel:
             logger.error("Secure channel not established")
             return None
         
-       
-            
         try:
-            # Your existing parsing logic
-            iv = encrypted_message[:12]
-    
-            # The Go implementation places the tag at the end
-            # The tag is 16 bytes
-            ciphertext = encrypted_message[12:-16]
-            tag = encrypted_message[-16:]
+            # Parse the encrypted message
+            parts = encrypted_message.split(":")
+            if len(parts) != 2:
+                logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
+                return None
             
-            # Create decryptor
+            # The first part is the base64-encoded nonce
+            nonce = base64.b64decode(parts[0])
+            
+            # The second part is the base64-encoded ciphertext+tag
+            encrypted_data = base64.b64decode(parts[1])
+            
+            # In AES-GCM, the tag is typically the last 16 bytes
+            ciphertext = encrypted_data[:-16]
+            tag = encrypted_data[-16:]
+            
+            # Create a decryptor
             cipher = Cipher(
-                algorithms.AES(key),
-                modes.GCM(iv, tag),
+                algorithms.AES(self.decryption_key),
+                modes.GCM(nonce, tag),
                 backend=default_backend()
             )
             decryptor = cipher.decryptor()
-    
-            # Decrypt the data
-            return decryptor.update(ciphertext) + decryptor.finalize()
-        
+            
+            # Add associated data (AAD) for authentication if your Go code uses it
+            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+            decryptor.authenticate_additional_data(aad)
+            
+            # Decrypt the ciphertext
+            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            # Increment the counter
+            self.receive_counter += 1
+            
+            return plaintext
+            
         except Exception as e:
-            print(f"Decryption error: {e}")
+            logger.error(f"Error decrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+    
     
     def send_encrypted(self, message_type, payload):
         """Send an encrypted message over the secure channel"""
@@ -635,54 +590,37 @@ def encrypt_file(input_file, output_file, key):
         logger.error(f"Error encrypting file: {e}")
         return False
 
-def decrypt_message(self, encrypted_message):
-    """Decrypt a message using AES-GCM"""
-    if not self.established or not self.decryption_key:
-        logger.error("Secure channel not established")
-        return None
-    
+def decrypt_file(input_file, output_file, key):
+    """Decrypt a file using AES-GCM"""
     try:
-        # Parse the encrypted message
-        parts = encrypted_message.split(":")
-        if len(parts) != 2:
-            logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
-            return None
-        
-        # The first part is the base64-encoded nonce
-        nonce = base64.b64decode(parts[0])
-        
-        # The second part is the base64-encoded ciphertext+tag
-        encrypted_data = base64.b64decode(parts[1])
-        
-        # In AES-GCM, the tag is typically the last 16 bytes
-        ciphertext = encrypted_data[:-16]
-        tag = encrypted_data[-16:]
+        # Read the encrypted file
+        with open(input_file, 'rb') as f:
+            # First 12 bytes are IV
+            iv = f.read(12)
+            # Next 16 bytes are tag
+            tag = f.read(16)
+            # Rest is ciphertext
+            ciphertext = f.read()
         
         # Create a decryptor
-        cipher = Cipher(
-            algorithms.AES(self.decryption_key),
-            modes.GCM(nonce, tag),
+        decryptor = Cipher(
+            algorithms.AES(key),
+            modes.GCM(iv, tag),
             backend=default_backend()
-        )
-        decryptor = cipher.decryptor()
+        ).decryptor()
         
-        # Add associated data (AAD) for authentication if your Go code uses it
-        aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-        decryptor.authenticate_additional_data(aad)
-        
-        # Decrypt the ciphertext
+        # Decrypt the file
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         
-        # Increment the counter
-        self.receive_counter += 1
+        # Write the decrypted data to output file
+        with open(output_file, 'wb') as f:
+            f.write(plaintext)
         
-        return plaintext
+        return True
         
     except Exception as e:
-        logger.error(f"Error decrypting message: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        logger.error(f"Error decrypting file: {e}")
+        return False
 
 # Utility function to establish a secure channel with a peer
 def establish_secure_channel(peer_id, peer_addr):
