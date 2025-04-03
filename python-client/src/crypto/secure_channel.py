@@ -313,8 +313,7 @@ class SecureChannel:
             iv = base64.b64decode(parts[0])
             ciphertext = base64.b64decode(parts[1])
             
-            logger.debug(f"Decrypting message with IV: {iv.hex()}")
-            logger.debug(f"Ciphertext length: {len(ciphertext)}")
+            logger.debug(f"IV length: {len(iv)}, Ciphertext length: {len(ciphertext)}")
             
             # Create AES-CBC cipher
             decryptor = Cipher(
@@ -326,16 +325,22 @@ class SecureChannel:
             # Decrypt the data
             plaintext_padded = decryptor.update(ciphertext) + decryptor.finalize()
             
-            # Remove PKCS7 padding manually
+            # Remove PKCS7 padding
             padding_length = plaintext_padded[-1]
-            if padding_length > 16:
+            
+            # Validate padding
+            if padding_length == 0 or padding_length > 16:
                 logger.error(f"Invalid padding length: {padding_length}")
                 return None
                 
+            # Verify padding bytes
+            for i in range(1, padding_length + 1):
+                if plaintext_padded[-i] != padding_length:
+                    logger.error("Invalid padding bytes")
+                    return None
+                    
             plaintext = plaintext_padded[:-padding_length]
-            
-            # Debug logging
-            logger.debug(f"Decrypted plaintext (hex): {plaintext.hex()}")
+            logger.debug(f"Decrypted length: {len(plaintext)}")
             
             return plaintext
                 
@@ -344,35 +349,6 @@ class SecureChannel:
             import traceback
             traceback.print_exc()
             return None
-        
-    def send_encrypted(self, message_type, payload):
-        """Send an encrypted message over the secure channel"""
-        if not self.established:
-            logger.error("Cannot send encrypted message - channel not established")
-            return False
-        
-        try:
-            # Construct the plaintext message
-            plaintext = f"{message_type}:{payload}".encode('utf-8')
-            
-            # Encrypt the message
-            encrypted = self.encrypt_message(plaintext)
-            if not encrypted:
-                logger.error(f"Failed to encrypt message of type {message_type}")
-                return False
-            
-            # Send the encrypted message
-            encrypted_message = f"SECURE:DATA:{encrypted}".encode('utf-8')
-            logger.info(f"Sending encrypted message: Type={message_type}, Length={len(encrypted_message)}")
-            
-            self.socket.sendall(encrypted_message)
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error sending encrypted message: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
     
     def handle_encrypted_data(self, encrypted_data):
         """Handle an incoming encrypted message"""

@@ -328,32 +328,32 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		return "", fmt.Errorf("error creating cipher: %v", err)
 	}
 
-	// Generate IV (16 bytes for CBC)
+	// Generate IV
 	iv := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return "", fmt.Errorf("error generating IV: %v", err)
 	}
 
-	// Add PKCS7 padding to plaintext
-	plaintext = pkcs7Pad(plaintext, aes.BlockSize)
+	// Add PKCS7 padding
+	padding := aes.BlockSize - (len(plaintext) % aes.BlockSize)
+	paddedData := make([]byte, len(plaintext)+padding)
+	copy(paddedData, plaintext)
+	for i := len(plaintext); i < len(paddedData); i++ {
+		paddedData[i] = byte(padding)
+	}
 
-	fmt.Printf("Padded plaintext: %v\n", plaintext)
-	// Print IV for debugging
-	fmt.Printf("IV length: %d, IV bytes: %v\n", len(iv), iv)
+	// Debug logging
+	fmt.Printf("Original length: %d, Padded length: %d\n", len(plaintext), len(paddedData))
+	fmt.Printf("Padding bytes: %v\n", paddedData[len(plaintext):])
 
-	// Encrypt with CBC mode
+	// Encrypt
+	ciphertext := make([]byte, len(paddedData))
 	mode := cipher.NewCBCEncrypter(block, iv)
-	ciphertext := make([]byte, len(plaintext))
-	mode.CryptBlocks(ciphertext, plaintext)
+	mode.CryptBlocks(ciphertext, paddedData)
 
-	// Increment counter
-	sc.SendCounter++
-
-	// Format: base64(iv) + ":" + base64(ciphertext)
-	encryptedMessage := base64.StdEncoding.EncodeToString(iv) + ":" +
-		base64.StdEncoding.EncodeToString(ciphertext)
-
-	return encryptedMessage, nil
+	// Format output
+	return base64.StdEncoding.EncodeToString(iv) + ":" +
+		base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 // DecryptMessage decrypts a message using AES-CBC instead of GCM
