@@ -284,7 +284,6 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
             return None
-    
     def decrypt_message(self, encrypted_message):
         """Decrypt a message using AES-GCM"""
         if not self.established or not self.decryption_key:
@@ -294,8 +293,6 @@ class SecureChannel:
         try:
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            logger.info(f"Message parts: {parts}")
-            
             if len(parts) != 2:
                 logger.error(f"Invalid encrypted message format: expected 2 parts, got {len(parts)}")
                 return None
@@ -310,75 +307,69 @@ class SecureChannel:
             ciphertext_with_tag = base64.b64decode(parts[1])
             
             # In Go's GCM implementation, the tag is appended to the ciphertext
-            # Standard tag size is 16 bytes in most implementations
             tag_size = 16
             
             if len(ciphertext_with_tag) <= tag_size:
                 logger.error(f"Ciphertext too short: {len(ciphertext_with_tag)}")
                 return None
                 
-            # Separate the tag from the ciphertext
             ciphertext = ciphertext_with_tag[:-tag_size]
             tag = ciphertext_with_tag[-tag_size:]
             
-            logger.info(f"Prepared decryption: nonce={len(nonce)}B, ciphertext={len(ciphertext)}B, tag={len(tag)}B")
+            # Try a series of possible AAD values, starting with the most likely
+            # The counter may be 0, 1, or some other value
+            possible_aads = []
             
-            # WARNING: The authentication data (AAD) might be different between implementations
-            # Try with a simplified AAD that doesn't rely on counter synchronization
-            # Instead of: aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-            aad = f"{self.peer_id}:{self.session_id}".encode('utf-8')
-            logger.info(f"Using simplified AAD: {aad}")
+            # Try counters from 0 to 5 to handle potential desynchronization
+            for counter in range(6):
+                possible_aads.append({
+                    "aad": f"{self.peer_id}:{self.session_id}:{counter}".encode('utf-8'),
+                    "desc": f"Full AAD with counter {counter}"
+                })
             
-            # Create decryptor with the tag
-            decryptor = Cipher(
-                algorithms.AES(self.decryption_key),
-                modes.GCM(nonce, tag),
-                backend=default_backend()
-            ).decryptor()
+            # Also try these simpler forms as fallbacks
+            possible_aads.extend([
+                {"aad": f"{self.peer_id}:{self.session_id}".encode('utf-8'), "desc": "Without counter"},
+                {"aad": self.peer_id.encode('utf-8'), "desc": "PeerID only"},
+                {"aad": self.session_id.encode('utf-8'), "desc": "SessionID only"},
+                {"aad": b"", "desc": "Empty AAD"}
+            ])
             
-            # Add the AAD
-            decryptor.authenticate_additional_data(aad)
-            
-            try:
-                # Attempt decryption
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                logger.info("Decryption successful!")
-                
-                # Increment counter after successful decryption
-                self.receive_counter += 1
-                
-                return plaintext
-            except Exception as e:
-                logger.error(f"Primary decryption failed: {e}")
-                
-                # Try various fallbacks
-                fallback_attempts = [
-                    {"aad": b"", "desc": "No AAD"},
-                    {"aad": self.peer_id.encode('utf-8'), "desc": "Peer ID only"},
-                    {"aad": self.session_id.encode('utf-8'), "desc": "Session ID only"}
-                ]
-                
-                for attempt in fallback_attempts:
-                    try:
-                        logger.info(f"Trying fallback: {attempt['desc']}")
-                        
-                        decryptor = Cipher(
-                            algorithms.AES(self.decryption_key),
-                            modes.GCM(nonce, tag),
-                            backend=default_backend()
-                        ).decryptor()
-                        
-                        decryptor.authenticate_additional_data(attempt["aad"])
-                        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                        
-                        logger.info(f"Fallback decryption successful with {attempt['desc']}!")
+            for attempt in possible_aads:
+                try:
+                    decryptor = Cipher(
+                        algorithms.AES(self.decryption_key),
+                        modes.GCM(nonce, tag),
+                        backend=default_backend()
+                    ).decryptor()
+                    
+                    logger.info(f"Trying AAD: {attempt['desc']} - {attempt['aad']}")
+                    decryptor.authenticate_additional_data(attempt["aad"])
+                    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                    
+                    logger.info(f"Decryption successful with {attempt['desc']}!")
+                    
+                    # If this was a counter-based AAD, adjust our counter accordingly
+                    if "counter" in attempt["desc"]:
+                        # Extract counter value from description
+                        counter_str = attempt["desc"].split()[-1]
+                        try:
+                            self.receive_counter = int(counter_str) + 1
+                            logger.info(f"Adjusted receive counter to {self.receive_counter}")
+                        except:
+                            pass
+                    else:
+                        # Otherwise, increment our counter
                         self.receive_counter += 1
-                        return plaintext
-                    except Exception as fallback_e:
-                        logger.error(f"Fallback {attempt['desc']} failed: {fallback_e}")
-                
-                return None
-                
+                    
+                    return plaintext
+                except Exception as e:
+                    logger.error(f"Decryption attempt failed for {attempt['desc']}: {str(e)}")
+                    continue
+            
+            logger.error("All decryption attempts failed")
+            return None
+            
         except Exception as e:
             logger.error(f"Error in decrypt_message: {e}")
             import traceback
