@@ -292,31 +292,31 @@ class SecureChannel:
             return None
         
         try:
-            # More flexible parsing - handle possible different formats
+            # Parse the encrypted message
             parts = encrypted_message.split(":")
-            
-            # Debug the parts
             logger.info(f"Message parts: {parts}")
             
-            if len(parts) < 2:
-                logger.error("Not enough parts in encrypted message")
-                return None
-                
-            # Try to be forgiving about the format
             if len(parts) == 2:
-                # If we only have two parts, assume it's nonce:ciphertext+tag
+                # In this format, the first part is the nonce, and the second part combines ciphertext and tag
                 nonce = base64.b64decode(parts[0])
+                
+                # Decode the second part (which contains both ciphertext and tag)
                 combined = base64.b64decode(parts[1])
-                # Assume the last 16 bytes are the tag
-                ciphertext = combined[:-16]
+                
+                # The tag is the last 16 bytes
                 tag = combined[-16:]
-            elif len(parts) >= 3:
-                # Normal case with three parts
+                # The ciphertext is everything before the tag
+                ciphertext = combined[:-16]
+                
+                logger.info(f"Successfully split combined data: nonce={len(nonce)}B, ciphertext={len(ciphertext)}B, tag={len(tag)}B")
+            elif len(parts) == 3:
+                # Original format with three parts
                 nonce = base64.b64decode(parts[0])
                 ciphertext = base64.b64decode(parts[1])
                 tag = base64.b64decode(parts[2])
-            
-        
+            else:
+                logger.error(f"Invalid encrypted message format: expected 2 or 3 parts, got {len(parts)}")
+                return None
             
             # Create a decryptor
             decryptor = Cipher(
@@ -330,15 +330,45 @@ class SecureChannel:
             decryptor.authenticate_additional_data(aad)
             
             # Decrypt the ciphertext
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            
-            # Increment the counter
-            self.receive_counter += 1
-            
-            return plaintext
+            try:
+                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                
+                # Increment the counter
+                self.receive_counter += 1
+                
+                return plaintext
+            except Exception as e:
+                logger.error(f"Decryption failed: {e}")
+                # Try with a different tag size as a fallback
+                if len(parts) == 2 and len(tag) == 16:
+                    try:
+                        # Try with a different tag size
+                        new_tag = combined[-12:]
+                        new_ciphertext = combined[:-12]
+                        
+                        decryptor = Cipher(
+                            algorithms.AES(self.decryption_key),
+                            modes.GCM(nonce, new_tag),
+                            backend=default_backend()
+                        ).decryptor()
+                        
+                        decryptor.authenticate_additional_data(aad)
+                        plaintext = decryptor.update(new_ciphertext) + decryptor.finalize()
+                        
+                        # Increment the counter
+                        self.receive_counter += 1
+                        
+                        logger.info("Decryption succeeded with alternate tag size")
+                        return plaintext
+                    except Exception as e2:
+                        logger.error(f"Alternate decryption also failed: {e2}")
+                        return None
+                return None
             
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def send_encrypted(self, message_type, payload):
