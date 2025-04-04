@@ -13,6 +13,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,12 +37,23 @@ type SecureChannel struct {
 	ReceiveCounter uint32
 	mutex          sync.Mutex
 }
+type SecureFileTransfer struct {
+	Filename string
+	Path     string
+	Size     int64
+	Hash     string
+	Key      []byte
+	Received int64
+	File     *os.File
+}
 
 // Global registry of secure channels
 var (
 	secureChannels     = make(map[string]*SecureChannel)
 	secureChannelMutex sync.RWMutex
 )
+var secureFileTransfers = make(map[string]*SecureFileTransfer)
+var fileTransferMutex sync.Mutex
 
 // In NewSecureChannel function in secure_channel.go
 // NewSecureChannel creates a new secure channel
@@ -670,6 +684,23 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 		if err != nil {
 			return nil, fmt.Errorf("error handling encrypted data: %v", err)
 		}
+		messageType := result["type"]
+		messagePayload := result["payload"]
+
+		switch messageType {
+		case "FILE_HEADER":
+			// Process file header
+			handleSecureFileHeader(peerID, messagePayload)
+		case "FILE_CHUNK":
+			// Process file chunk
+			handleSecureFileChunk(peerID, messagePayload)
+		case "FILE_END":
+			// Process file end
+			handleSecureFileEnd(peerID, messagePayload)
+		case "FILE_LIST":
+			// Process file list
+			handleSecureFileList(peerID, messagePayload)
+		}
 
 		return map[string]interface{}{
 			"status":  "message_received",
@@ -680,6 +711,267 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 
 	default:
 		return nil, fmt.Errorf("unknown secure command: %s", secureCommand)
+	}
+}
+func handleSecureFileHeader(peerID, payload string) {
+	fmt.Printf("Received file header from %s\n", peerID)
+
+	// Parse the header JSON
+	var header map[string]interface{}
+	err := json.Unmarshal([]byte(payload), &header)
+	if err != nil {
+		fmt.Printf("Error parsing file header: %v\n", err)
+		return
+	}
+
+	// Extract file information
+	filename, ok := header["filename"].(string)
+	if !ok {
+		fmt.Printf("Missing filename in header\n")
+		return
+	}
+
+	size, ok := header["size"].(float64)
+	if !ok {
+		fmt.Printf("Missing file size in header\n")
+		return
+	}
+
+	// Get hash if available
+	var hash string
+	if hashVal, ok := header["hash"].(string); ok {
+		hash = hashVal
+	}
+
+	// Get encryption key if available
+	var key []byte
+	if keyB64, ok := header["key"].(string); ok {
+		key, err = base64.StdEncoding.DecodeString(keyB64)
+		if err != nil {
+			fmt.Printf("Error decoding encryption key: %v\n", err)
+		} else {
+			fmt.Printf("Got encryption key for file (length: %d)\n", len(key))
+		}
+	}
+
+	// Create directory for downloads
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error getting user home directory: %v\n", err)
+		return
+	}
+
+	downloadDir := filepath.Join(homeDir, ".p2p-share", "shared")
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		fmt.Printf("Error creating download directory: %v\n", err)
+		return
+	}
+
+	// Create file
+	savePath := filepath.Join(downloadDir, filename)
+	file, err := os.Create(savePath)
+	if err != nil {
+		fmt.Printf("Error creating file: %v\n", err)
+		return
+	}
+
+	// Store transfer state
+	fileTransferMutex.Lock()
+	secureFileTransfers[peerID] = &SecureFileTransfer{
+		Filename: filename,
+		Path:     savePath,
+		Size:     int64(size),
+		Hash:     hash,
+		Key:      key,
+		Received: 0,
+		File:     file,
+	}
+	fileTransferMutex.Unlock()
+
+	fmt.Printf("\nReceiving file: %s (%d bytes)\n", filename, int64(size))
+}
+
+func handleSecureFileChunk(peerID, payload string) {
+	fileTransferMutex.Lock()
+	transfer, exists := secureFileTransfers[peerID]
+	fileTransferMutex.Unlock()
+
+	if !exists {
+		fmt.Printf("No active file transfer for peer %s\n", peerID)
+		return
+	}
+
+	// Decode the base64 chunk
+	encryptedChunk, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		fmt.Printf("Error decoding file chunk: %v\n", err)
+		return
+	}
+
+	// Decrypt if we have a key
+	var chunk []byte
+	if transfer.Key != nil {
+		// Decrypt the chunk
+		block, err := aes.NewCipher(transfer.Key)
+		if err != nil {
+			fmt.Printf("Error creating cipher: %v\n", err)
+			return
+		}
+
+		// First 12 bytes should be IV, next 16 are tag
+		if len(encryptedChunk) < 28 {
+			fmt.Printf("Encrypted chunk too short\n")
+			return
+		}
+
+		iv := encryptedChunk[:12]
+		tag := encryptedChunk[12:28]
+		ciphertext := encryptedChunk[28:]
+
+		fmt.Printf("Decrypting chunk (length: %d)\n", len(ciphertext))
+		fmt.Printf("IV (hex): %x\n", iv)
+		fmt.Printf("Tag (hex): %x\n", tag)
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			fmt.Printf("Error creating GCM: %v\n", err)
+			return
+		}
+
+		// Try decryption
+		chunk, err = gcm.Open(nil, iv, encryptedChunk[12:], nil)
+		if err != nil {
+			fmt.Printf("Error decrypting chunk: %v\n", err)
+			// Fall back to using the raw chunk
+			chunk = encryptedChunk
+		}
+	} else {
+		// No encryption, use the raw chunk
+		chunk = encryptedChunk
+	}
+
+	// Write to file
+	_, err = transfer.File.Write(chunk)
+	if err != nil {
+		fmt.Printf("Error writing file chunk: %v\n", err)
+		return
+	}
+
+	// Update received count
+	transfer.Received += int64(len(chunk))
+
+	// Display progress
+	if transfer.Size > 0 {
+		percent := float64(transfer.Received) / float64(transfer.Size) * 100
+		fmt.Printf("\rReceiving: %.1f%%", percent)
+	}
+}
+
+func handleSecureFileEnd(peerID, payload string) {
+	fmt.Printf("\nFile transfer from %s completed\n", peerID)
+
+	fileTransferMutex.Lock()
+	transfer, exists := secureFileTransfers[peerID]
+	fileTransferMutex.Unlock()
+
+	if !exists {
+		fmt.Printf("No active file transfer for peer %s\n", peerID)
+		return
+	}
+
+	// Close the file
+	if transfer.File != nil {
+		transfer.File.Close()
+	}
+
+	fmt.Printf("Received file: %s (%d bytes)\n", transfer.Filename, transfer.Received)
+
+	// Verify hash if available
+	if transfer.Hash != "" {
+		fmt.Printf("Hash verification not implemented yet\n")
+		// You could add hash verification here
+	}
+
+	// Cleanup
+	fileTransferMutex.Lock()
+	delete(secureFileTransfers, peerID)
+	fileTransferMutex.Unlock()
+
+	fmt.Printf("\nFile download complete: %s\n", transfer.Path)
+}
+
+func handleSecureFileList(peerID, payload string) {
+	fmt.Printf("Received file list from peer %s\n", peerID)
+
+	if payload == "" {
+		fmt.Printf("No files available from peer\n")
+		return
+	}
+
+	// Determine the format of the file list
+	var files []string
+
+	if strings.Contains(payload, ";") {
+		// New format with file entries separated by semicolons
+		files = strings.Split(payload, ";")
+	} else if strings.Contains(payload, ",") {
+		// Check if it's comma-separated files or individual file with metadata
+		if strings.Count(payload, ",") == 2 {
+			// Single file entry with hash and size
+			files = []string{payload}
+		} else {
+			// Old format with comma-separated filenames
+			files = strings.Split(payload, ",")
+		}
+	} else if payload != "" {
+		// Single file with no metadata
+		files = []string{payload}
+	}
+
+	if len(files) == 0 {
+		fmt.Printf("No files available from peer\n")
+		return
+	}
+
+	fmt.Printf("\nFiles available from peer %s:\n", peerID)
+
+	for i, file := range files {
+		if file == "" {
+			continue
+		}
+
+		// Check if file has metadata
+		if strings.Count(file, ",") == 2 {
+			// Parse file,hash,size triplet
+			parts := strings.Split(file, ",")
+			filename := parts[0]
+			hash := parts[1]
+			sizeStr := parts[2]
+
+			// Format size display
+			sizeDisplay := ""
+			if sizeStr != "" {
+				size, err := strconv.ParseInt(sizeStr, 10, 64)
+				if err == nil {
+					if size < 1024 {
+						sizeDisplay = fmt.Sprintf(" (%d bytes)", size)
+					} else if size < 1024*1024 {
+						sizeDisplay = fmt.Sprintf(" (%.1f KB)", float64(size)/1024)
+					} else {
+						sizeDisplay = fmt.Sprintf(" (%.1f MB)", float64(size)/(1024*1024))
+					}
+				}
+			}
+
+			verifiedStr := ""
+			if hash != "" {
+				verifiedStr = " [verifiable]"
+			}
+
+			fmt.Printf("%d. %s%s%s\n", i+1, filename, sizeDisplay, verifiedStr)
+		} else {
+			// Simple filename without metadata
+			fmt.Printf("%d. %s\n", i+1, file)
+		}
 	}
 }
 
