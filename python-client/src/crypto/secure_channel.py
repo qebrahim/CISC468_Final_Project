@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Global registry of secure channels
 secure_channels = {}
+conn_to_peer_id = {}
 
 class SecureChannel:
     """
@@ -176,8 +177,46 @@ class SecureChannel:
             logger.error(f"Error handling exchange response: {e}")
             return False
     
+    def deriveKey(secret, salt, length):
+        """
+        Python implementation of Go's deriveKey function.
+        This needs to match the Go implementation exactly.
+        """
+        import hashlib
+        
+        # If no salt provided, use a fixed salt
+        if salt is None or len(salt) == 0:
+            salt = b"p2p-file-sharing-salt"
+        
+        # Use SHA-256 for key derivation
+        hash_obj = hashlib.sha256()
+        hash_obj.update(secret)
+        hash_obj.update(salt)
+        
+        # Get the hash result
+        derived = hash_obj.digest()
+        
+        # If we need a key shorter than hash output, truncate
+        if length <= len(derived):
+            return derived[:length]
+        
+        # For longer keys, keep hashing with a counter
+        result = derived
+        counter = 0
+        
+        while len(result) < length:
+            hash_obj = hashlib.sha256()
+            hash_obj.update(derived)
+            hash_obj.update(bytes([counter]))
+            counter += 1
+            
+            derived = hash_obj.digest()
+            result += derived
+        
+        return result[:length]
+
     def _derive_shared_secret(self):
-        """Derive shared secret using ECDHE"""
+        """Derive shared secret using ECDHE - fixed to match Go implementation"""
         try:
             # Compute shared secret
             shared_secret = self.private_key.exchange(
@@ -185,50 +224,53 @@ class SecureChannel:
                 self.peer_public_key
             )
             
-            # Use HKDF to derive two separate keys for each direction
-            # We use different info values to derive different keys for each direction
+            logger.error(f"Shared secret length: {len(shared_secret)}")
+            logger.error(f"Shared secret (hex): {shared_secret.hex()}")
+            
+            # Use Go-compatible key derivation function
             if self.is_initiator:
                 # Initiator uses first key for sending, second for receiving
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,  # 256 bits for AES-256
-                    salt=None,
-                    info=b"initiator_to_responder"
-                ).derive(shared_secret)
+                self.encryption_key = deriveKey(
+                    shared_secret,
+                    b"initiator_to_responder",
+                    32
+                )
                 
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"responder_to_initiator"
-                ).derive(shared_secret)
+                self.decryption_key = deriveKey(
+                    shared_secret,
+                    b"responder_to_initiator",
+                    32
+                )
+                
+                logger.error("Derived keys as initiator (Go-compatible)")
             else:
                 # Responder uses first key for receiving, second for sending
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"initiator_to_responder"
-                ).derive(shared_secret)
+                self.decryption_key = deriveKey(
+                    shared_secret,
+                    b"initiator_to_responder",
+                    32
+                )
                 
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=b"responder_to_initiator"
-                ).derive(shared_secret)
+                self.encryption_key = deriveKey(
+                    shared_secret,
+                    b"responder_to_initiator",
+                    32
+                )
+                
+                logger.error("Derived keys as responder (Go-compatible)")
             
-            logger.debug("Derived encryption and decryption keys")
+            logger.error(f"Encryption key (hex): {self.encryption_key.hex()}")
+            logger.error(f"Decryption key (hex): {self.decryption_key.hex()}")
             
             # Clear the private key for forward secrecy
-            # Once we've derived the shared secret, we don't need the private key anymore
-            # This ensures forward secrecy even if the device is compromised later
             self.private_key = None
             
             return True
             
         except Exception as e:
             logger.error(f"Error deriving shared secret: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def encrypt_message(self, plaintext):
@@ -238,9 +280,23 @@ class SecureChannel:
             return None
         
         try:
+            logger.error(f"Encrypt: encryption key length: {len(self.encryption_key)}")
+            logger.error(f"Encrypt: encryption key (hex): {self.encryption_key.hex()}")
+            logger.error(f"Encrypt: plaintext length: {len(plaintext)}")
+            
             # Generate a nonce using the counter (12 bytes)
             # We use a combination of session ID and counter to ensure uniqueness
-            nonce = self.session_id[:8].encode('utf-8') + self.send_counter.to_bytes(4, byteorder='big')
+            session_id_bytes = self.session_id[:8].encode('utf-8')
+            logger.error(f"Session ID for nonce: {self.session_id[:8]}")
+            logger.error(f"Session ID bytes for nonce (hex): {session_id_bytes.hex()}")
+            
+            counter_bytes = self.send_counter.to_bytes(4, byteorder='big')
+            logger.error(f"Counter for nonce: {self.send_counter}")
+            logger.error(f"Counter bytes for nonce (hex): {counter_bytes.hex()}")
+            
+            nonce = session_id_bytes + counter_bytes
+            logger.error(f"Nonce length: {len(nonce)}")
+            logger.error(f"Nonce (hex): {nonce.hex()}")
             
             # Create an encryptor
             encryptor = Cipher(
@@ -250,22 +306,40 @@ class SecureChannel:
             ).encryptor()
             
             # Add associated data (AAD) for authentication
-            aad = f"{self.peer_id}:{self.session_id}:{self.send_counter}".encode('utf-8')
+            peer_id_str = self.peer_id
+            session_id_str = self.session_id
+            counter_int = self.send_counter
+            
+            logger.error(f"AAD components - peer_id: {peer_id_str}, session_id: {session_id_str}, counter: {counter_int}")
+            
+            # For compatibility with Go, format AAD the same way
+            aad = f"{peer_id_str}:{session_id_str}:{counter_int}".encode('utf-8')
+            logger.error(f"AAD: {aad}")
+            logger.error(f"AAD (hex): {aad.hex()}")
+            
             encryptor.authenticate_additional_data(aad)
             
             # Encrypt the plaintext
             ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+            logger.error(f"Ciphertext length: {len(ciphertext)}")
             
             # Get the tag
             tag = encryptor.tag
+            logger.error(f"Tag length: {len(tag)}")
+            logger.error(f"Tag (hex): {tag.hex()}")
             
             # Increment the counter
             self.send_counter += 1
             
-            # Format: base64(nonce) + ":" + base64(ciphertext) + ":" + base64(tag)
+            # Format to match Go's expected format:
+            # Go expects: base64(nonce) + ":" + base64(ciphertext+tag)
+            combined_ciphertext_and_tag = ciphertext + tag
+            logger.error(f"Combined ciphertext+tag length: {len(combined_ciphertext_and_tag)}")
+            
             encrypted_message = base64.b64encode(nonce).decode('utf-8') + ":" + \
-                               base64.b64encode(ciphertext).decode('utf-8') + ":" + \
-                               base64.b64encode(tag).decode('utf-8')
+                            base64.b64encode(combined_ciphertext_and_tag).decode('utf-8')
+            
+            logger.error(f"Final encrypted message format: {encrypted_message}")
             
             return encrypted_message
             
@@ -274,44 +348,111 @@ class SecureChannel:
             return None
     
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-GCM"""
+        """Decrypt a message using AES-GCM with fixes for Go compatibility"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
         
         try:
+            logger.info(f"Decrypting message with key length: {len(self.decryption_key)}")
+            
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            if len(parts) != 3:
-                logger.error("Invalid encrypted message format")
+            if len(parts) != 2:
+                logger.error(f"Invalid encrypted message format: got {len(parts)} parts")
                 return None
             
             nonce = base64.b64decode(parts[0])
-            ciphertext = base64.b64decode(parts[1])
-            tag = base64.b64decode(parts[2])
+            logger.info(f"Nonce (hex): {nonce.hex()}")
             
-            # Create a decryptor
-            decryptor = Cipher(
-                algorithms.AES(self.decryption_key),
-                modes.GCM(nonce, tag),
-                backend=default_backend()
-            ).decryptor()
+            encrypted_data = base64.b64decode(parts[1])
+            logger.info(f"Encrypted data length: {len(encrypted_data)}")
             
-            # Add associated data (AAD) for authentication
-            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
-            decryptor.authenticate_additional_data(aad)
+            # In AES-GCM, the tag is the last 16 bytes
+            ciphertext = encrypted_data[:-16]
+            tag = encrypted_data[-16:]
+            logger.info(f"Ciphertext length: {len(ciphertext)}, Tag (hex): {tag.hex()}")
             
-            # Decrypt the ciphertext
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            # Try multiple AAD approaches
+            attempts = [
+                # 1. Try No AAD first
+                {
+                    "name": "No AAD",
+                    "aad": None
+                },
+                # 2. Standard AAD with full session ID
+                {
+                    "name": "Standard AAD with full session ID",
+                    "aad": f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+                },
+                # 3. AAD with truncated session ID (matching nonce)
+                {
+                    "name": "AAD with truncated session ID",
+                    "aad": f"{self.peer_id}:{self.session_id[:8]}:{self.receive_counter}".encode('utf-8')
+                },
+                # 4. AAD with different format
+                {
+                    "name": "Alternative AAD format",
+                    "aad": f"{self.peer_id}|{self.session_id}|{self.receive_counter}".encode('utf-8')
+                }
+            ]
             
-            # Increment the counter
-            self.receive_counter += 1
+            # Try each approach
+            for attempt in attempts:
+                try:
+                    logger.info(f"Trying decryption with {attempt['name']}")
+                    
+                    # Create new cipher for each attempt
+                    cipher = Cipher(
+                        algorithms.AES(self.decryption_key),
+                        modes.GCM(nonce, tag),
+                        backend=default_backend()
+                    )
+                    decryptor = cipher.decryptor()
+                    
+                    # Add AAD if specified
+                    if attempt["aad"]:
+                        logger.info(f"Using AAD: {attempt['aad']}")
+                        decryptor.authenticate_additional_data(attempt["aad"])
+                    
+                    # Decrypt
+                    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                    
+                    # If we get here, decryption was successful
+                    logger.info(f"SUCCESS with {attempt['name']}! Decrypted message: {plaintext[:50]}")
+                    self.receive_counter += 1
+                    return plaintext
+                    
+                except Exception as e:
+                    logger.info(f"Failed with {attempt['name']}: {e}")
+                    continue
             
-            return plaintext
+            # Special case: try directly with the raw encrypted data
+            try:
+                logger.info("Trying direct GCM Open approach")
+                
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                aesgcm = AESGCM(self.decryption_key)
+                aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+                
+                plaintext = aesgcm.decrypt(nonce, encrypted_data, aad)
+                logger.info(f"SUCCESS with direct GCM Open!")
+                self.receive_counter += 1
+                return plaintext
+                
+            except Exception as e:
+                logger.info(f"Failed with direct GCM Open: {e}")
+            
+            # If we get here, all attempts failed
+            logger.error("All decryption attempts failed")
+            return None
             
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+    
     
     def send_encrypted(self, message_type, payload):
         """Send an encrypted message over the secure channel"""
@@ -441,16 +582,24 @@ def handle_secure_message(conn, addr, message):
                 contact = {"peer_id": extracted_peer_id}
             else:
                 return {"status": "not_authenticated"}
+        if extracted_peer_id:
+            conn_id = id(conn)
+            conn_to_peer_id[conn_id] = extracted_peer_id
+            logger.info(f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
         
         # Prioritize the extracted peer ID
         peer_id = extracted_peer_id or contact["peer_id"]
         logger.info(f"Using peer ID: {peer_id}")
+        if not hasattr(handle_secure_message, 'conn_to_peer_id'):
+            handle_secure_message.conn_to_peer_id = {}
 
         # The rest of the function remains the same as in the original implementation
         if secure_command == "EXCHANGE":
             # Handle key exchange request
             try:
                 exchange_data = json.loads(payload)
+                handle_secure_message.conn_to_peer_id[id(conn)] = peer_id
+
                 
                 # Create a new secure channel as responder
                 channel = create_secure_channel(peer_id, conn, is_initiator=False)
@@ -489,11 +638,32 @@ def handle_secure_message(conn, addr, message):
         elif secure_command == "DATA":
             # Handle encrypted data
             try:
-                channel = get_secure_channel(peer_id)
                 
-                if not channel:
-                    logger.error(f"No secure channel established for peer {peer_id}")
-                    return {"status": "no_secure_channel"}
+                
+                conn_id = id(conn)
+                mapped_peer_id = conn_to_peer_id.get(conn_id)
+        
+                if mapped_peer_id:
+                    logger.info(f"Using mapped peer ID for DATA: {mapped_peer_id}")
+                    peer_id = mapped_peer_id
+                    channel = get_secure_channel(mapped_peer_id)
+                else:
+                    logger.info(f"Using default peer ID: {peer_id}")
+                    channel = get_secure_channel(peer_id)
+                logger.debug(f"Channel lookup with peer_id: {peer_id}")
+                logger.debug(f"Available secure channels: {list(secure_channels.keys())}")
+                
+                logger.debug(f"Looking for channel with peer_id: {peer_id}")
+                logger.debug(f"Available channels: {list(secure_channels.keys())}")
+
+                # Try alternative lookup methods:
+                if channel is None:
+                    for potential_id, potential_channel in secure_channels.items():
+                        logger.debug(f"Comparing {potential_channel.socket} with {conn}")
+                        if potential_channel.socket == conn:
+                            logger.info(f"Found channel by socket match: {potential_id}")
+                            channel = potential_channel
+                            break
                 
                 # Decrypt and handle the data
                 result = channel.handle_encrypted_data(payload)
@@ -622,3 +792,40 @@ def establish_secure_channel(peer_id, peer_addr):
     except Exception as e:
         logger.error(f"Error establishing secure channel: {e}")
         return {"status": "error", "message": str(e)}
+def deriveKey(secret, salt, length):
+        """
+        Python implementation of Go's deriveKey function.
+        This needs to match the Go implementation exactly.
+        """
+        import hashlib
+        
+        # If no salt provided, use a fixed salt
+        if salt is None or len(salt) == 0:
+            salt = b"p2p-file-sharing-salt"
+        
+        # Use SHA-256 for key derivation
+        hash_obj = hashlib.sha256()
+        hash_obj.update(secret)
+        hash_obj.update(salt)
+        
+        # Get the hash result
+        derived = hash_obj.digest()
+        
+        # If we need a key shorter than hash output, truncate
+        if length <= len(derived):
+            return derived[:length]
+        
+        # For longer keys, keep hashing with a counter
+        result = derived
+        counter = 0
+        
+        while len(result) < length:
+            hash_obj = hashlib.sha256()
+            hash_obj.update(derived)
+            hash_obj.update(bytes([counter]))
+            counter += 1
+            
+            derived = hash_obj.digest()
+            result += derived
+        
+        return result[:length]

@@ -13,6 +13,8 @@ import (
 	"os/signal"
 	"p2p-file-sharing/go-client/internal/crypto"
 	"p2p-file-sharing/go-client/internal/discovery"
+	"p2p-file-sharing/go-client/internal/network"
+	"p2p-file-sharing/go-client/internal/storage"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,6 +29,7 @@ var sharedFiles []string
 var hashManager *crypto.HashManager
 var contactManager *crypto.ContactManager
 var authentication *crypto.PeerAuthentication
+var secureStorage *storage.SecureStorage
 
 // Global server port
 const serverPort = 12345
@@ -40,6 +43,10 @@ type SecureFileTransfer struct {
 	Hash        string
 	TransferKey []byte
 	File        *os.File
+	// New fields
+	IsComplete bool
+	StartTime  time.Time
+	EndTime    time.Time
 }
 
 var secureFileTransfers = make(map[string]*SecureFileTransfer)
@@ -63,6 +70,14 @@ func main() {
 		// Continue without hash verification if failed
 	} else {
 		fmt.Println(" Hash manager initialized for file verification")
+	}
+
+	secureStorage, err = storage.NewSecureStorage()
+	if err != nil {
+		fmt.Printf("⚠️ Warning: Failed to initialize secure storage: %v\n", err)
+		// Continue without secure storage if initialization fails
+	} else {
+		fmt.Println("✅ Secure storage initialized")
 	}
 
 	// Initialize security system
@@ -223,6 +238,10 @@ func runCommandLineInterface() {
 		case "7":
 			establishSecureChannel(scanner)
 		case "8":
+			handleSecureStorage(scanner)
+		case "9":
+			handleKeyMigration(scanner)
+		case "10":
 			fmt.Println("Exiting application...")
 			gracefulShutdown()
 			return
@@ -241,7 +260,9 @@ func displayMenu() {
 	fmt.Println("5. Authenticate peer")
 	fmt.Println("6. List trusted contacts")
 	fmt.Println("7. Establish secure channel")
-	fmt.Println("8. Exit")
+	fmt.Println("8. Secure storage")
+	fmt.Println("9. Key migration")
+	fmt.Println("10. Exit")
 }
 
 func listConnectedPeers() {
@@ -925,13 +946,37 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		// Check if this is a secure channel message
 		if command == "SECURE" {
 			// Process secure channel message
-			if len(parts) > 1 {
-				_, err := crypto.HandleSecureMessage(conn, peerAddr, message)
-				if err != nil {
-					fmt.Printf("Error handling secure message: %v\n", err)
-				}
+			addr := parts[1]
+			result, err := crypto.HandleSecureMessage(conn, addr, message)
+			if err != nil {
+				fmt.Printf("Error handling secure message: %v\n", err)
+				continue
 			}
-			continue
+			if result != nil && result["status"] == "message_received" {
+				// Get message details
+				messageType, typeOk := result["type"].(string)
+				payload, payloadOk := result["payload"].(string)
+				peerID, peerOk := result["peer_id"].(string)
+
+				if !typeOk || !payloadOk || !peerOk {
+					fmt.Printf("Invalid secure message format\n")
+					continue
+				}
+				if messageType == "REQUEST_FILE" {
+					// Handle file request
+					handleFileRequest(conn, peerAddr, payload)
+				} else if messageType == "LIST_FILES" {
+					// Handle file list request
+					handleListFilesRequest(conn)
+				} else if messageType == "FILE_HEADER" || messageType == "FILE_CHUNK" || messageType == "FILE_END" {
+					// Handle file transfer messages
+					handleSecureFileTransfer(peerID, messageType, payload)
+				} else {
+					fmt.Printf("Unknown secure message type: %s\n", messageType)
+				}
+				continue
+
+			}
 		}
 
 		// For sensitive operations, check if peer is authenticated
@@ -990,6 +1035,12 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 				fmt.Printf("Accepted secure channel request from %s\n", peerID)
 			} else {
 				conn.Write([]byte("ERR:AUTHENTICATION_NOT_AVAILABLE"))
+			}
+		case "OFFLINE_FILE_REQUEST":
+			if len(parts) > 1 {
+				network.HandleOfflineFileRequest(conn, parts[1])
+			} else {
+				conn.Write([]byte("ERR:INVALID_REQUEST"))
 			}
 
 		default:
@@ -1231,7 +1282,6 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 		}
 
 		// Encrypt this chunk
-		// Encrypt this chunk
 		chunk := buffer[:bytesRead]
 		encryptedChunk, err := crypto.Encrypt(chunk, transferKey)
 		if err != nil {
@@ -1272,52 +1322,178 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 // This function would be part of the secure channel message handling in main.go
 func handleSecureFileTransfer(peerID string, messageType string, payload string) {
 	// Access the global transfer state map
-	if messageType == "FILE_CHUNK" {
+	transfer, exists := secureFileTransfers[peerID]
+
+	if messageType == "FILE_HEADER" {
+		// Process a file header which initiates a new transfer
+		var header map[string]interface{}
+		err := json.Unmarshal([]byte(payload), &header)
+		if err != nil {
+			fmt.Printf("Error parsing file header: %v\n", err)
+			return
+		}
+
+		// Extract information from the header
+		filename, ok := header["filename"].(string)
+		if !ok {
+			fmt.Printf("Missing filename in file header\n")
+			return
+		}
+
+		// Size might be float64 in JSON
+		var fileSize int64
+		switch size := header["size"].(type) {
+		case float64:
+			fileSize = int64(size)
+		case int64:
+			fileSize = size
+		case json.Number:
+			fileSize, _ = size.Int64()
+		default:
+			fmt.Printf("Invalid file size type: %T\n", header["size"])
+			return
+		}
+
+		// Extract optional hash
+		fileHash := ""
+		if hash, ok := header["hash"].(string); ok {
+			fileHash = hash
+		}
+
+		// Extract encryption key if present
+		var transferKey []byte
+		if keyB64, ok := header["key"].(string); ok {
+			transferKey, err = base64.StdEncoding.DecodeString(keyB64)
+			if err != nil {
+				fmt.Printf("Error decoding transfer key: %v\n", err)
+			} else {
+				fmt.Printf("Received encryption key for file transfer (len: %d)\n", len(transferKey))
+			}
+		}
+
+		// Create download directory if needed
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("Error getting home directory: %v\n", err)
+			return
+		}
+		downloadDir := filepath.Join(homeDir, ".p2p-share", "shared")
+		os.MkdirAll(downloadDir, 0755)
+
+		// Create file to save the download
+		filePath := filepath.Join(downloadDir, filename)
+		file, err := os.Create(filePath)
+		if err != nil {
+			fmt.Printf("Error creating file: %v\n", err)
+			return
+		}
+
+		// Initialize transfer object
+		secureFileTransfers[peerID] = &SecureFileTransfer{
+			Filename:    filename,
+			Path:        filePath,
+			Size:        fileSize,
+			Received:    0,
+			Hash:        fileHash,
+			TransferKey: transferKey,
+			File:        file,
+			IsComplete:  false,
+			StartTime:   time.Now(),
+		}
+
+		fmt.Printf("Starting secure file transfer: %s (%d bytes)\n", filename, fileSize)
+
+	} else if messageType == "FILE_CHUNK" {
 		// Process a file chunk
-		transfer, exists := secureFileTransfers[peerID]
 		if !exists {
 			fmt.Printf("No active file transfer for peer %s\n", peerID)
 			return
 		}
 
-		// Decode the chunk
-		encryptedChunkB64 := payload
-		encryptedChunk, err := base64.StdEncoding.DecodeString(encryptedChunkB64)
+		// Decode the base64 chunk
+		encryptedChunk, err := base64.StdEncoding.DecodeString(payload)
 		if err != nil {
 			fmt.Printf("Error decoding file chunk: %v\n", err)
 			return
 		}
+
 		var chunk []byte
 		// Decrypt the chunk if we have an encryption key
 		if transfer.TransferKey != nil {
-			chunk, err := crypto.Decrypt(encryptedChunk, transfer.TransferKey)
+			chunk, err = crypto.Decrypt(encryptedChunk, transfer.TransferKey)
 			if err != nil {
 				fmt.Printf("Error decrypting file chunk: %v\n", err)
 				return
 			}
-
-			// Write decrypted chunk to file
-			_, err = transfer.File.Write(chunk)
-			if err != nil {
-				fmt.Printf("Error writing file chunk: %v\n", err)
-				return
-			}
 		} else {
-			// No encryption key, write directly (backwards compatibility)
-			_, err = transfer.File.Write(encryptedChunk)
-			if err != nil {
-				fmt.Printf("Error writing file chunk: %v\n", err)
-				return
-			}
+			// No encryption key, use raw data (for backward compatibility)
+			chunk = encryptedChunk
+		}
+
+		// Write the chunk to file
+		_, err = transfer.File.Write(chunk)
+		if err != nil {
+			fmt.Printf("Error writing file chunk: %v\n", err)
+			return
 		}
 
 		transfer.Received += len(chunk)
 
 		// Display progress
 		percentComplete := float64(transfer.Received) / float64(transfer.Size) * 100
-		if transfer.Received%40960 == 0 { // Log every ~40KB
+		if transfer.Received%40960 == 0 || transfer.Received >= int(transfer.Size) {
 			fmt.Printf("Receiving (secure): %.1f%%\n", percentComplete)
 		}
+
+	} else if messageType == "FILE_END" {
+		// Process end of file marker
+		if !exists {
+			fmt.Printf("No active file transfer for peer %s\n", peerID)
+			return
+		}
+
+		// Close the file
+		if transfer.File != nil {
+			transfer.File.Close()
+			transfer.File = nil
+		}
+
+		transfer.EndTime = time.Now()
+		transfer.IsComplete = true
+		duration := transfer.EndTime.Sub(transfer.StartTime)
+
+		// Verify the transfer is complete
+		if int64(transfer.Received) < transfer.Size {
+			fmt.Printf("Warning: Incomplete file transfer for %s (%d/%d bytes)\n",
+				transfer.Filename, transfer.Received, transfer.Size)
+		} else {
+			fmt.Printf("File transfer complete: %s (%d bytes in %v)\n",
+				transfer.Filename, transfer.Size, duration)
+		}
+
+		// Verify hash if available
+		if transfer.Hash != "" && hashManager != nil {
+			verified, err := hashManager.VerifyFileHash(transfer.Path, transfer.Hash)
+			if err != nil || !verified {
+				fmt.Printf("File verification failed: %v\n", err)
+			} else {
+				fmt.Printf("File integrity verified successfully\n")
+
+				// Add hash to our database
+				hashManager.AddFileHash(transfer.Filename, transfer.Path, peerID)
+			}
+		}
+
+		// Add to shared files
+		absPath, _ := filepath.Abs(transfer.Path)
+		if !contains(sharedFiles, absPath) {
+			sharedFiles = append(sharedFiles, absPath)
+		}
+
+		// Clean up
+		delete(secureFileTransfers, peerID)
+	} else {
+		fmt.Printf("Unknown secure file message type: %s\n", messageType)
 	}
 }
 
@@ -1402,22 +1578,27 @@ func requestFileFromPeer(host string, port int, filename string, useSecure bool)
 							if response == "ESTABLISH_SECURE:ACCEPTED" {
 								// Establish secure channel
 								result, err := crypto.EstablishSecureChannel(contact.PeerID, standardAddr)
-								if err != nil || result["status"] != "initiated" {
+								if err != nil {
 									fmt.Printf("Error establishing secure channel: %v\n", err)
 									fmt.Println("Falling back to regular connection")
 									useSecure = false
-								} else {
-									// Wait for channel to be established
+								}
+								if result["status"] == "established" {
+									fmt.Println("Secure channel established successfully")
 									time.Sleep(1 * time.Second)
 									secureChannel = crypto.GetSecureChannel(contact.PeerID)
 									if secureChannel == nil || !secureChannel.Established {
-										fmt.Println("Failed to establish secure channel")
+										fmt.Println("Failed to establish secure channel inner")
 										fmt.Println("Falling back to regular connection")
 										useSecure = false
 									} else {
 										fmt.Println("Secure channel established")
 									}
+
+								} else {
+									fmt.Printf("Failed to establish secure channel: %s\n", result["message"])
 								}
+
 							} else {
 								fmt.Println("Peer rejected secure channel request")
 								fmt.Println("Falling back to regular connection")
@@ -1438,6 +1619,7 @@ func requestFileFromPeer(host string, port int, filename string, useSecure bool)
 	if useSecure && secureChannel != nil && secureChannel.Established {
 		requestFileSecure(secureChannel, filename)
 	} else {
+
 		requestFileRegular(host, port, filename)
 	}
 }
@@ -1449,7 +1631,36 @@ func requestFileRegular(host string, port int, filename string) {
 	conn, err := net.Dial("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
 	if err != nil {
 		fmt.Printf("Failed to connect for file transfer: %v\n", err)
+		fmt.Printf("Attempting to find alternative sources...\n")
+
+		fileHash := ""
+		if hashManager != nil {
+			hashInfo, exists := hashManager.GetFileHash(filename)
+			if exists {
+				fileHash = hashInfo.Hash
+				fmt.Printf("Using hash %s for verification\n", fileHash)
+			}
+		}
+		success, alternativePeer, err := network.RequestFileFromAlternative(
+			filename,
+			"",
+			authentication.PeerID,
+			fileHash,
+		)
+
+		if err != nil {
+			fmt.Printf("Error finding alternative source: %v\n", err)
+			return
+		}
+
+		if success {
+			fmt.Printf("Successfully retrieved file from alternative peer: %s\n", alternativePeer)
+			return
+		}
+
+		fmt.Printf("Failed to find alternative source for file\n")
 		return
+
 	}
 	defer conn.Close()
 
@@ -1700,4 +1911,242 @@ func gracefulShutdown() {
 		conn.Close()
 	}
 	fmt.Println("Shutdown complete")
+}
+func handleSecureStorage(scanner *bufio.Scanner) {
+	if secureStorage == nil {
+		fmt.Println("Secure storage is not available")
+		return
+	}
+
+	fmt.Println("\nSecure Storage Options:")
+	fmt.Println("1. Store a file securely")
+	fmt.Println("2. Retrieve a secure file")
+	fmt.Println("3. List secure files")
+	fmt.Println("4. Delete a secure file")
+	fmt.Println("5. Return to main menu")
+
+	fmt.Print("\nEnter option: ")
+	scanner.Scan()
+	choice := scanner.Text()
+
+	switch choice {
+	case "1":
+		// Store a file securely
+		fmt.Print("Enter file path to store securely: ")
+		scanner.Scan()
+		filePath := scanner.Text()
+
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			fmt.Println("File not found")
+			return
+		}
+
+		fmt.Print("Enter passphrase (leave empty to auto-generate): ")
+		scanner.Scan()
+		passphrase := scanner.Text()
+
+		outputPath, err := secureStorage.SecureStoreFile(filePath, passphrase)
+		if err != nil {
+			fmt.Printf("Error storing file securely: %v\n", err)
+		} else {
+			fmt.Printf("File stored securely at: %s\n", outputPath)
+		}
+
+	case "2":
+		// Retrieve a secure file
+		secureFiles, err := secureStorage.ListSecureFiles()
+		if err != nil {
+			fmt.Printf("Error listing secure files: %v\n", err)
+			return
+		}
+
+		if len(secureFiles) == 0 {
+			fmt.Println("No secure files found")
+			return
+		}
+
+		fmt.Println("\nSecure files:")
+		for i, file := range secureFiles {
+			fmt.Printf("%d. %s\n", i+1, filepath.Base(file))
+		}
+
+		fmt.Print("\nEnter file number to retrieve: ")
+		scanner.Scan()
+		fileIdx, err := strconv.Atoi(scanner.Text())
+		if err != nil || fileIdx < 1 || fileIdx > len(secureFiles) {
+			fmt.Println("Invalid file selection")
+			return
+		}
+
+		selectedFile := secureFiles[fileIdx-1]
+
+		fmt.Print("Enter output path (leave empty for default): ")
+		scanner.Scan()
+		outputPath := scanner.Text()
+
+		if outputPath == "" {
+			// Use default output location in shared directory
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Printf("Error getting home directory: %v\n", err)
+				return
+			}
+
+			// Create shared directory if it doesn't exist
+			sharedDir := filepath.Join(homeDir, ".p2p-share", "shared")
+			err = os.MkdirAll(sharedDir, 0755)
+			if err != nil {
+				fmt.Printf("Error creating shared directory: %v\n", err)
+				return
+			}
+
+			// Remove .enc extension and unique ID from filename
+			baseName := filepath.Base(selectedFile)
+			parts := strings.Split(strings.TrimSuffix(baseName, ".enc"), "_")
+			if len(parts) > 1 {
+				// Keep the original filename without the unique ID
+				outputPath = filepath.Join(sharedDir, parts[0]+filepath.Ext(selectedFile))
+			} else {
+				outputPath = filepath.Join(sharedDir, baseName)
+			}
+		}
+
+		fmt.Print("Enter passphrase (leave empty to use stored key): ")
+		scanner.Scan()
+		passphrase := scanner.Text()
+
+		err = secureStorage.SecureRetrieveFile(selectedFile, outputPath, passphrase)
+		if err != nil {
+			fmt.Printf("Error retrieving secure file: %v\n", err)
+		} else {
+			fmt.Printf("File retrieved successfully to: %s\n", outputPath)
+		}
+
+	case "3":
+		// List secure files
+		secureFiles, err := secureStorage.ListSecureFiles()
+		if err != nil {
+			fmt.Printf("Error listing secure files: %v\n", err)
+			return
+		}
+
+		if len(secureFiles) == 0 {
+			fmt.Println("No secure files found")
+			return
+		}
+
+		fmt.Println("\nSecure files:")
+		for i, file := range secureFiles {
+			fmt.Printf("%d. %s\n", i+1, filepath.Base(file))
+		}
+
+	case "4":
+		// Delete a secure file
+		secureFiles, err := secureStorage.ListSecureFiles()
+		if err != nil {
+			fmt.Printf("Error listing secure files: %v\n", err)
+			return
+		}
+
+		if len(secureFiles) == 0 {
+			fmt.Println("No secure files found")
+			return
+		}
+
+		fmt.Println("\nSecure files:")
+		for i, file := range secureFiles {
+			fmt.Printf("%d. %s\n", i+1, filepath.Base(file))
+		}
+
+		fmt.Print("\nEnter file number to delete: ")
+		scanner.Scan()
+		fileIdx, err := strconv.Atoi(scanner.Text())
+		if err != nil || fileIdx < 1 || fileIdx > len(secureFiles) {
+			fmt.Println("Invalid file selection")
+			return
+		}
+
+		selectedFile := secureFiles[fileIdx-1]
+
+		fmt.Print("Are you sure you want to delete this file? (y/n): ")
+		scanner.Scan()
+		confirmation := scanner.Text()
+
+		if strings.ToLower(confirmation) == "y" {
+			err = secureStorage.DeleteSecureFile(selectedFile)
+			if err != nil {
+				fmt.Printf("Error deleting secure file: %v\n", err)
+			} else {
+				fmt.Println("File deleted successfully")
+			}
+		}
+
+	case "5":
+		return
+
+	default:
+		fmt.Println("Invalid option")
+	}
+}
+
+// Add this new function to handle key migration
+func handleKeyMigration(scanner *bufio.Scanner) {
+	if contactManager == nil || authentication == nil {
+		fmt.Println("Authentication system not initialized")
+		return
+	}
+
+	fmt.Println("\nKey Migration Options:")
+	fmt.Println("1. Initiate key migration")
+	fmt.Println("2. Return to main menu")
+
+	fmt.Print("\nEnter option: ")
+	scanner.Scan()
+	choice := scanner.Text()
+
+	if choice != "1" {
+		return
+	}
+
+	fmt.Println("\nInitiating key migration process...")
+	fmt.Println("This will generate a new key pair and notify all your contacts")
+	fmt.Print("Are you sure you want to continue? (y/n): ")
+	scanner.Scan()
+	confirmation := scanner.Text()
+
+	if strings.ToLower(confirmation) != "y" {
+		fmt.Println("Key migration cancelled")
+		return
+	}
+
+	// Start key migration
+	migration, err := crypto.InitiateMigration(authentication.PeerID, contactManager)
+	if err != nil {
+		fmt.Printf("Error initiating key migration: %v\n", err)
+		return
+	}
+
+	// Notify contacts about the migration
+	fmt.Println("Notifying trusted contacts about key migration...")
+	err = migration.NotifyContacts()
+	if err != nil {
+		fmt.Printf("Error notifying contacts: %v\n", err)
+		fmt.Print("Do you want to continue with the migration anyway? (y/n): ")
+		scanner.Scan()
+		confirmation := scanner.Text()
+		if strings.ToLower(confirmation) != "y" {
+			fmt.Println("Key migration cancelled")
+			return
+		}
+	}
+
+	// Complete the migration
+	err = migration.CompleteMigration()
+	if err != nil {
+		fmt.Printf("Error completing key migration: %v\n", err)
+		return
+	}
+
+	fmt.Println("✅ Key migration completed successfully")
+	fmt.Println("You need to restart the application for the changes to take effect")
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,6 +27,9 @@ type HashManager struct {
 	StoragePath string
 	HashFile    string
 	Hashes      map[string]FileHashInfo
+}
+type HashCalculator struct {
+	hash hash.Hash
 }
 
 // NewHashManager creates a new HashManager
@@ -208,4 +212,21 @@ func (hm *HashManager) GetFileHashesAsString(fileList []string) string {
 	}
 
 	return strings.Join(result, ";")
+}
+
+// NewHashCalculator creates a new hash calculator
+func NewHashCalculator() *HashCalculator {
+	return &HashCalculator{
+		hash: sha256.New(),
+	}
+}
+
+// Update adds more data to the hash calculation
+func (h *HashCalculator) Update(data []byte) {
+	h.hash.Write(data)
+}
+
+// Finalize returns the final hash
+func (h *HashCalculator) Finalize() string {
+	return fmt.Sprintf("%x", h.hash.Sum(nil))
 }

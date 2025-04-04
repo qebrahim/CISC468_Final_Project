@@ -26,8 +26,8 @@ type SecureChannel struct {
 	IsInitiator    bool
 	Established    bool
 	SessionID      string
-	ECDSAPrivKey   *ecdsa.PrivateKey // Using ECDSA instead of ECDH
-	ECDSAPubKey    *ecdsa.PublicKey  // Using ECDSA instead of ECDH
+	PrivateKey     *ecdh.PrivateKey // Switch back to ECDH for Python compatibility
+	PeerPublicKey  *ecdh.PublicKey  // Switch back to ECDH for Python compatibility
 	EncryptionKey  []byte
 	DecryptionKey  []byte
 	SendCounter    uint32
@@ -44,20 +44,21 @@ var (
 // In NewSecureChannel function in secure_channel.go
 // NewSecureChannel creates a new secure channel
 func NewSecureChannel(peerID string, conn net.Conn, isInitiator bool) (*SecureChannel, error) {
-	// Generate key pair - use crypto/x509 for compatibility with Python's cryptography
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// Generate key pair using ECDH for compatibility with Python's cryptography
+	curve := ecdh.P256()
+	privateKey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("error generating ephemeral key: %v", err)
 	}
 
 	sc := &SecureChannel{
-		PeerID:       peerID,
-		Conn:         conn,
-		IsInitiator:  isInitiator,
-		ECDSAPrivKey: privateKey,
-		Established:  false,
-		SessionID:    "",
-		mutex:        sync.Mutex{},
+		PeerID:      peerID,
+		Conn:        conn,
+		IsInitiator: isInitiator,
+		PrivateKey:  privateKey,
+		Established: false,
+		SessionID:   "",
+		mutex:       sync.Mutex{},
 	}
 
 	return sc, nil
@@ -73,7 +74,7 @@ func (sc *SecureChannel) InitiateKeyExchange() error {
 	sc.SessionID = fmt.Sprintf("%x", sessionIDBytes)
 
 	// Format public key in a way that's compatible with Python's cryptography library
-	publicKeyBytes, err := x509.MarshalPKIXPublicKey(&sc.ECDSAPrivKey.PublicKey)
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(sc.PrivateKey.PublicKey())
 	if err != nil {
 		return fmt.Errorf("error marshaling public key: %v", err)
 	}
@@ -111,7 +112,6 @@ func (sc *SecureChannel) InitiateKeyExchange() error {
 	return nil
 }
 
-// HandleKeyExchange processes a key exchange message from a peer
 func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) error {
 	// Extract peer ID, session ID, and public key
 	peerID, ok := exchangeData["peer_id"].(string)
@@ -148,18 +148,32 @@ func (sc *SecureChannel) HandleKeyExchange(exchangeData map[string]interface{}) 
 		return fmt.Errorf("error parsing public key: %v", err)
 	}
 
-	ecdsaPub, ok := pub.(*ecdsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("public key is not an ECDSA key")
+	// Handle both EC and ECDH public keys
+	// In both HandleKeyExchange and HandleExchangeResponse:
+	var ecdhPubKey *ecdh.PublicKey
+	switch p := pub.(type) {
+	case *ecdh.PublicKey:
+		ecdhPubKey = p
+	case *ecdsa.PublicKey:
+		// ECDSA keys can be used with ECDH directly if they're on the right curve
+		curve := ecdh.P256()
+		rawKey := elliptic.Marshal(p.Curve, p.X, p.Y)
+		ecdhPubKey, err = curve.NewPublicKey(rawKey)
+		if err != nil {
+			return fmt.Errorf("error converting ECDSA key to ECDH format: %v", err)
+		}
+		fmt.Printf("Successfully converted ECDSA key to ECDH format\n")
+	default:
+		return fmt.Errorf("unsupported key type: %T", pub)
 	}
 
-	// Store the parsed ECDSA public key
-	sc.ECDSAPubKey = ecdsaPub
+	// Store the parsed ECDH public key
+	sc.PeerPublicKey = ecdhPubKey
 
 	// If we're the responder, send our public key back
 	if !sc.IsInitiator {
 		// Format our public key as PEM
-		ourPublicKeyBytes, err := x509.MarshalPKIXPublicKey(&sc.ECDSAPrivKey.PublicKey)
+		ourPublicKeyBytes, err := x509.MarshalPKIXPublicKey(sc.PrivateKey.PublicKey())
 		if err != nil {
 			return fmt.Errorf("error marshaling our public key: %v", err)
 		}
@@ -250,17 +264,27 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 		return fmt.Errorf("error parsing public key: %v", err)
 	}
 
-	// Specifically handle both ECDSA and ECDH keys
-	switch key := pub.(type) {
-	case *ecdsa.PublicKey:
-		sc.ECDSAPubKey = key
+	// Handle both EC and ECDH public keys
+	// In both HandleKeyExchange and HandleExchangeResponse:
+	var ecdhPubKey *ecdh.PublicKey
+	switch p := pub.(type) {
 	case *ecdh.PublicKey:
-		// Convert ECDH to ECDSA if needed
-		// You might need to add conversion logic here
-		return fmt.Errorf("unsupported key type: ECDH")
+		ecdhPubKey = p
+	case *ecdsa.PublicKey:
+		// ECDSA keys can be used with ECDH directly if they're on the right curve
+		curve := ecdh.P256()
+		rawKey := elliptic.Marshal(p.Curve, p.X, p.Y)
+		ecdhPubKey, err = curve.NewPublicKey(rawKey)
+		if err != nil {
+			return fmt.Errorf("error converting ECDSA key to ECDH format: %v", err)
+		}
+		fmt.Printf("Successfully converted ECDSA key to ECDH format\n")
 	default:
-		return fmt.Errorf("unexpected public key type: %T", pub)
+		return fmt.Errorf("unsupported key type: %T", pub)
 	}
+
+	// Store the parsed ECDH public key
+	sc.PeerPublicKey = ecdhPubKey
 
 	// Derive shared secret and encryption keys
 	err = sc.DeriveSharedSecret()
@@ -282,16 +306,17 @@ func (sc *SecureChannel) HandleExchangeResponse(responseData map[string]interfac
 
 // DeriveSharedSecret computes the shared secret for encryption
 func (sc *SecureChannel) DeriveSharedSecret() error {
-	// Compute shared secret using ECDH with ECDSA keys
-	// For ECDSA, we use the peer's X,Y coordinates multiplied by our private key to create a shared point
-	xCoord, _ := sc.ECDSAPrivKey.Curve.ScalarMult(
-		sc.ECDSAPubKey.X,
-		sc.ECDSAPubKey.Y,
-		sc.ECDSAPrivKey.D.Bytes(),
-	)
+	// Compute shared secret using ECDH
+	if sc.PeerPublicKey == nil {
+		return fmt.Errorf("peer public key not set")
+	}
 
-	// Use the X coordinate as the shared secret
-	sharedSecret := xCoord.Bytes()
+	sharedSecret, err := sc.PrivateKey.ECDH(sc.PeerPublicKey)
+	if err != nil {
+		return fmt.Errorf("error computing ECDH shared secret: %v", err)
+	}
+
+	fmt.Printf("Computed shared secret for peer %s (length: %d)\n", sc.PeerID, len(sharedSecret))
 
 	// Derive encryption and decryption keys using HKDF-like approach
 	if sc.IsInitiator {
@@ -305,12 +330,11 @@ func (sc *SecureChannel) DeriveSharedSecret() error {
 	}
 
 	// Clear private key for forward secrecy
-	sc.ECDSAPrivKey = nil
+	sc.PrivateKey = nil
 
 	return nil
 }
 
-// EncryptMessage encrypts a message using AES-GCM
 func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -319,40 +343,79 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 		return "", fmt.Errorf("secure channel not established")
 	}
 
+	// Print debug information
+	fmt.Printf("Go Encrypt Debug: encryption key length: %d\n", len(sc.EncryptionKey))
+	fmt.Printf("Go Encrypt Debug: encryption key (hex): %x\n", sc.EncryptionKey)
+	fmt.Printf("Go Encrypt Debug: plaintext length: %d\n", len(plaintext))
+	fmt.Printf("Go Encrypt Debug: plaintext: %s\n", string(plaintext))
+
 	// Create AES-GCM cipher
 	block, err := aes.NewCipher(sc.EncryptionKey)
 	if err != nil {
+		fmt.Printf("Go Encrypt Error: creating cipher: %v\n", err)
 		return "", fmt.Errorf("error creating cipher: %v", err)
 	}
 
 	// Generate a nonce using the counter
 	nonce := make([]byte, 12)
 	// Use session ID as prefix (first 8 bytes)
-	copy(nonce, []byte(sc.SessionID[:8]))
+	sessionIDBytes := []byte(sc.SessionID[:8])
+	fmt.Printf("Go Encrypt Debug: session ID for nonce: %s\n", sc.SessionID[:8])
+	fmt.Printf("Go Encrypt Debug: session ID bytes for nonce (hex): %x\n", sessionIDBytes)
+
+	copy(nonce, sessionIDBytes)
+
 	// Use counter for the last 4 bytes
-	nonce[8] = byte(sc.SendCounter >> 24)
-	nonce[9] = byte(sc.SendCounter >> 16)
-	nonce[10] = byte(sc.SendCounter >> 8)
-	nonce[11] = byte(sc.SendCounter)
+	counterBytes := make([]byte, 4)
+	counterBytes[0] = byte(sc.SendCounter >> 24)
+	counterBytes[1] = byte(sc.SendCounter >> 16)
+	counterBytes[2] = byte(sc.SendCounter >> 8)
+	counterBytes[3] = byte(sc.SendCounter)
+
+	fmt.Printf("Go Encrypt Debug: counter for nonce: %d\n", sc.SendCounter)
+	fmt.Printf("Go Encrypt Debug: counter bytes for nonce (hex): %x\n", counterBytes)
+
+	copy(nonce[8:], counterBytes)
+	fmt.Printf("Go Encrypt Debug: complete nonce (hex): %x\n", nonce)
 
 	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
+		fmt.Printf("Go Encrypt Error: creating GCM: %v\n", err)
 		return "", fmt.Errorf("error creating GCM: %v", err)
 	}
 
 	// Create additional data (AAD) for authentication
-	aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter))
+	aadStr := fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter)
+	aad := []byte(aadStr)
+
+	fmt.Printf("Go Encrypt Debug: AAD string: %s\n", aadStr)
+	fmt.Printf("Go Encrypt Debug: AAD bytes (hex): %x\n", aad)
 
 	// Encrypt the plaintext
 	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
+	fmt.Printf("Go Encrypt Debug: full ciphertext+tag length: %d\n", len(ciphertext))
+
+	// GCM tag is always at the end, standard length is 16 bytes
+	tagStart := len(ciphertext) - 16
+	tag := ciphertext[tagStart:]
+	actualCiphertext := ciphertext[:tagStart]
+
+	fmt.Printf("Go Encrypt Debug: actual ciphertext length: %d\n", len(actualCiphertext))
+	fmt.Printf("Go Encrypt Debug: tag length: %d\n", len(tag))
+	fmt.Printf("Go Encrypt Debug: tag (hex): %x\n", tag)
 
 	// Increment the counter
 	sc.SendCounter++
 
 	// Format: base64(nonce) + ":" + base64(ciphertext)
-	encryptedMessage := base64.StdEncoding.EncodeToString(nonce) + ":" +
-		base64.StdEncoding.EncodeToString(ciphertext)
+	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
+	ciphertextB64 := base64.StdEncoding.EncodeToString(ciphertext)
+	encryptedMessage := nonceB64 + ":" + ciphertextB64
+
+	fmt.Printf("Go Encrypt Debug: nonce base64: %s\n", nonceB64)
+	fmt.Printf("Go Encrypt Debug: ciphertext+tag base64: %s\n", ciphertextB64)
+	fmt.Printf("Go Encrypt Debug: final encrypted message: %s\n", encryptedMessage)
 
 	return encryptedMessage, nil
 }
@@ -368,6 +431,8 @@ func (sc *SecureChannel) DecryptMessage(encryptedMessage string) ([]byte, error)
 
 	// Parse the encrypted message
 	parts := strings.Split(encryptedMessage, ":")
+	fmt.Printf("Decrypt: got %d parts, expecting 2\n", len(parts))
+
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid encrypted message format")
 	}
@@ -473,14 +538,12 @@ func (sc *SecureChannel) Close() {
 	// Clear sensitive data
 	sc.EncryptionKey = nil
 	sc.DecryptionKey = nil
-	sc.ECDSAPrivKey = nil // Changed from PrivateKey
-	sc.ECDSAPubKey = nil  // Changed from PeerPublicKey
+	sc.PrivateKey = nil
+	sc.PeerPublicKey = nil
 
 	sc.Established = false
 	fmt.Printf("Secure channel with peer %s closed\n", sc.PeerID)
 }
-
-// GetSecureChannel gets an existing secure channel for a peer
 func GetSecureChannel(peerID string) *SecureChannel {
 	secureChannelMutex.RLock()
 	defer secureChannelMutex.RUnlock()

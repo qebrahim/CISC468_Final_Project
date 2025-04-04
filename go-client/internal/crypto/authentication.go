@@ -296,3 +296,11 @@ func (pa *PeerAuthentication) LoadPeerPublicKey(publicKeyPEM string) (*rsa.Publi
 
 	return pubKey, nil
 }
+
+// Add this function to a suitable file in the crypto package, e.g., authentication.go
+func GetPeerID() string {
+	if authentication == nil {
+		return ""
+	}
+	return authentication.PeerID
+}
