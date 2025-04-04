@@ -440,6 +440,35 @@ class SecureChannel:
             import traceback
             logger.error(traceback.format_exc())
             return None
+    def _decrypt_standard(self, nonce, ciphertext, tag, aad):
+        """Standard decryption approach using Cipher/GCM"""
+        try:
+            cipher = Cipher(
+                algorithms.AES(self.decryption_key),
+                modes.GCM(nonce, tag),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            
+            if aad:
+                decryptor.authenticate_additional_data(aad)
+                
+            return decryptor.update(ciphertext) + decryptor.finalize()
+        except Exception as e:
+            logger.debug(f"Standard decryption failed: {e}")
+            return None
+
+    def _decrypt_direct_aesgcm(self, nonce, encrypted_data, aad):
+        """Direct decryption using AESGCM approach"""
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(self.decryption_key)
+            
+            # In this approach, we don't split the tag
+            return aesgcm.decrypt(nonce, encrypted_data, aad)
+        except Exception as e:
+            logger.debug(f"Direct AESGCM decryption failed: {e}")
+            return None
 
     def send_encrypted(self, message_type, payload):
         """Send an encrypted message over the secure channel"""
