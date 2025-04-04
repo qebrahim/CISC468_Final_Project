@@ -177,48 +177,67 @@ class SecureChannel:
             return False
     
     def _derive_shared_secret(self):
-        """Derive shared secret using ECDHE"""
+        """Derive shared secret using ECDHE with detailed debug"""
         try:
+            # Log the inputs to key derivation
+            logger.error(f"Deriving shared secret - is_initiator: {self.is_initiator}")
+            logger.error(f"My private key type: {type(self.private_key).__name__}")
+            logger.error(f"Peer public key type: {type(self.peer_public_key).__name__}")
+            
             # Compute shared secret
             shared_secret = self.private_key.exchange(
                 ec.ECDH(),
                 self.peer_public_key
             )
             
+            logger.error(f"Shared secret length: {len(shared_secret)}")
+            logger.error(f"Shared secret (hex): {shared_secret.hex()}")
+            
             # Use HKDF to derive two separate keys for each direction
             # We use different info values to derive different keys for each direction
             if self.is_initiator:
+                logger.error("Deriving keys as initiator")
+                
                 # Initiator uses first key for sending, second for receiving
+                info1 = b"initiator_to_responder"
+                info2 = b"responder_to_initiator"
+                
                 self.encryption_key = HKDF(
                     algorithm=hashes.SHA256(),
                     length=32,  # 256 bits for AES-256
                     salt=None,
-                    info=b"initiator_to_responder"
+                    info=info1
                 ).derive(shared_secret)
                 
                 self.decryption_key = HKDF(
                     algorithm=hashes.SHA256(),
                     length=32,
                     salt=None,
-                    info=b"responder_to_initiator"
+                    info=info2
                 ).derive(shared_secret)
             else:
+                logger.error("Deriving keys as responder")
+                
                 # Responder uses first key for receiving, second for sending
+                info1 = b"initiator_to_responder"
+                info2 = b"responder_to_initiator"
+                
                 self.decryption_key = HKDF(
                     algorithm=hashes.SHA256(),
                     length=32,
                     salt=None,
-                    info=b"initiator_to_responder"
+                    info=info1
                 ).derive(shared_secret)
                 
                 self.encryption_key = HKDF(
                     algorithm=hashes.SHA256(),
                     length=32,
                     salt=None,
-                    info=b"responder_to_initiator"
+                    info=info2
                 ).derive(shared_secret)
             
-            logger.debug("Derived encryption and decryption keys")
+            logger.error(f"Encryption key (hex): {self.encryption_key.hex()}")
+            logger.error(f"Decryption key (hex): {self.decryption_key.hex()}")
             
             # Clear the private key for forward secrecy
             # Once we've derived the shared secret, we don't need the private key anymore
@@ -229,6 +248,8 @@ class SecureChannel:
             
         except Exception as e:
             logger.error(f"Error deriving shared secret: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def encrypt_message(self, plaintext):
