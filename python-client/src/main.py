@@ -349,9 +349,9 @@ class P2PApplication:
                     print("Invalid peer selection")
 
             elif choice == "8":
-                    self._handle_secure_storage()
+                self._handle_secure_storage()
             elif choice == "9":
-                    self._handle_key_migration()
+                self._handle_key_migration()
             elif choice == "10":
                 # Exit the application
                 self.shutdown()
@@ -400,6 +400,7 @@ class P2PApplication:
 
     def _handle_shutdown(self, signum, frame):
         self.shutdown()
+
     def _handle_secure_storage(self):
         """Handle secure storage operations"""
         print("\nSecure Storage Options:")
@@ -408,127 +409,135 @@ class P2PApplication:
         print("3. List secure files")
         print("4. Delete a secure file")
         print("5. Return to main menu")
-        
+
         try:
             option = input("\nEnter option: ")
-            
+
             if option == "1":
                 # Store a file securely
                 file_path = input("Enter file path to store securely: ")
-                
+
                 if not os.path.exists(file_path):
                     print("File not found")
                     return
-                
-                passphrase = input("Enter passphrase (leave empty to auto-generate): ")
-                
+
+                passphrase = input(
+                    "Enter passphrase (leave empty to auto-generate): ")
+
                 try:
-                    output_path = secure_store_file(file_path, passphrase if passphrase else None)
+                    output_path = secure_store_file(
+                        file_path, passphrase if passphrase else None)
                     print(f"File stored securely at: {output_path}")
                 except Exception as e:
                     print(f"Error storing file securely: {e}")
-            
+
             elif option == "2":
                 # Retrieve a secure file
                 try:
                     secure_files = list_secure_files()
-                    
+
                     if not secure_files:
                         print("No secure files found")
                         return
-                    
+
                     print("\nSecure files:")
                     for i, file_path in enumerate(secure_files, 1):
                         print(f"{i}. {os.path.basename(file_path)}")
-                    
+
                     file_idx = int(input("\nEnter file number to retrieve: "))
                     if file_idx < 1 or file_idx > len(secure_files):
                         print("Invalid file selection")
                         return
-                    
+
                     selected_file = secure_files[file_idx - 1]
-                    
-                    output_path = input("Enter output path (leave empty for default): ")
+
+                    output_path = input(
+                        "Enter output path (leave empty for default): ")
                     if not output_path:
                         # Use default output location in shared directory
                         base_name = os.path.basename(selected_file)
                         name_parts = os.path.splitext(base_name)[0].split("_")
-                        
+
                         if len(name_parts) > 1:
                             # Remove unique ID from filename
                             original_name = name_parts[0]
                         else:
                             original_name = name_parts[0]
-                        
-                        output_path = str(self.shared_directory / original_name)
-                    
-                    passphrase = input("Enter passphrase (leave empty to use stored key): ")
-                    
-                    secure_retrieve_file(selected_file, output_path, passphrase if passphrase else None)
+
+                        output_path = str(
+                            self.shared_directory / original_name)
+
+                    passphrase = input(
+                        "Enter passphrase (leave empty to use stored key): ")
+
+                    secure_retrieve_file(
+                        selected_file, output_path, passphrase if passphrase else None)
                     print(f"File retrieved successfully to: {output_path}")
-                    
+
                 except Exception as e:
                     print(f"Error retrieving secure file: {e}")
-            
+
             elif option == "3":
                 # List secure files
                 try:
                     secure_files = list_secure_files()
-                    
+
                     if not secure_files:
                         print("No secure files found")
                         return
-                    
+
                     print("\nSecure files:")
                     for i, file_path in enumerate(secure_files, 1):
                         print(f"{i}. {os.path.basename(file_path)}")
-                        
+
                 except Exception as e:
                     print(f"Error listing secure files: {e}")
-            
+
             elif option == "4":
                 # Delete a secure file
                 try:
                     secure_files = list_secure_files()
-                    
+
                     if not secure_files:
                         print("No secure files found")
                         return
-                    
+
                     print("\nSecure files:")
                     for i, file_path in enumerate(secure_files, 1):
                         print(f"{i}. {os.path.basename(file_path)}")
-                    
+
                     file_idx = int(input("\nEnter file number to delete: "))
                     if file_idx < 1 or file_idx > len(secure_files):
                         print("Invalid file selection")
                         return
-                    
+
                     selected_file = secure_files[file_idx - 1]
-                    
-                    confirm = input("Are you sure you want to delete this file? (y/n): ").lower()
+
+                    confirm = input(
+                        "Are you sure you want to delete this file? (y/n): ").lower()
                     if confirm == 'y':
                         # Delete the encrypted file
                         os.remove(selected_file)
-                        
+
                         # Try to delete the key file if it exists
-                        key_file = Path.home() / '.p2p-share' / 'keys' / 'secure' / f"{os.path.basename(selected_file)}.key"
+                        key_file = Path.home() / '.p2p-share' / 'keys' / 'secure' / \
+                            f"{os.path.basename(selected_file)}.key"
                         try:
                             os.remove(key_file)
                         except:
                             pass  # Key file might not exist
-                        
+
                         print("File deleted successfully")
-                
+
                 except Exception as e:
                     print(f"Error deleting secure file: {e}")
-            
+
             elif option == "5":
                 return
-            
+
             else:
                 print("Invalid option")
-                
+
         except Exception as e:
             print(f"Error: {e}")
 
@@ -537,61 +546,63 @@ class P2PApplication:
         if not hasattr(self, 'authentication') or not self.authentication:
             print("Authentication system not initialized")
             return
-        
+
         print("\nKey Migration Options:")
         print("1. Initiate key migration")
         print("2. Return to main menu")
-        
+
         option = input("\nEnter option: ")
-        
+
         if option != "1":
             return
-        
+
         print("\nInitiating key migration process...")
         print("This will generate a new key pair and notify all your contacts")
         confirm = input("Are you sure you want to continue? (y/n): ").lower()
-        
+
         if confirm != 'y':
             print("Key migration cancelled")
             return
-        
+
         try:
             # Create key migration object
-            migration = KeyMigration(self.peer_id, self.contact_manager, self.authentication)
-            
+            migration = KeyMigration(
+                self.peer_id, self.contact_manager, self.authentication)
+
             # Initiate migration (backup old keys and generate new ones)
             result = migration.initiate_migration()
-            
+
             if result["status"] != "ready":
                 print(f"Error initiating key migration: {result['message']}")
                 return
-            
+
             # Notify contacts
             print("Notifying trusted contacts about key migration...")
             notify_result = migration.notify_contacts()
-            
+
             if notify_result["status"] not in ["complete", "warning"]:
                 print(f"Error notifying contacts: {notify_result['message']}")
-                confirm = input("Do you want to continue with the migration anyway? (y/n): ").lower()
+                confirm = input(
+                    "Do you want to continue with the migration anyway? (y/n): ").lower()
                 if confirm != 'y':
                     print("Key migration cancelled")
                     return
             else:
                 print(f"{notify_result['message']}")
-            
+
             # Complete migration by saving the new keys
             complete_result = migration.complete_migration()
-            
+
             if complete_result["status"] != "complete":
-                print(f"Error completing key migration: {complete_result['message']}")
+                print(
+                    f"Error completing key migration: {complete_result['message']}")
                 return
-            
+
             print("✅ Key migration completed successfully")
             print("You need to restart the application for the changes to take effect")
-            
+
         except Exception as e:
             print(f"Error during key migration: {e}")
-
 
 
 def main():
