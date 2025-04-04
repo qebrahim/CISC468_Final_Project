@@ -915,6 +915,7 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		fmt.Printf(" Received from %s: %s\n", peerAddr, message)
 
 		// Parse and process the message
+		fmt.Printf("DEBUG: Raw message: %s\n", message)
 		parts := strings.SplitN(message, ":", 2)
 		if len(parts) < 2 {
 			fmt.Printf("Invalid message format from %s\n", peerAddr)
@@ -922,6 +923,7 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		}
 
 		command := parts[0]
+		fmt.Printf("DEBUG: Identified command: %s\n", command)
 
 		// Parse peer address for standardized authentication checks
 		hostPort := strings.Split(peerAddr, ":")
@@ -946,36 +948,48 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		// Check if this is a secure channel message
 		if command == "SECURE" {
 			// Process secure channel message
-			addr := parts[1]
-			result, err := crypto.HandleSecureMessage(conn, addr, message)
+			result, err := crypto.HandleSecureMessage(conn, peerAddr, message)
 			if err != nil {
 				fmt.Printf("Error handling secure message: %v\n", err)
 				continue
 			}
-			if result != nil && result["status"] == "message_received" {
-				// Get message details
-				messageType, typeOk := result["type"].(string)
-				payload, payloadOk := result["payload"].(string)
-				peerID, peerOk := result["peer_id"].(string)
 
-				if !typeOk || !payloadOk || !peerOk {
-					fmt.Printf("Invalid secure message format\n")
-					continue
-				}
-				if messageType == "REQUEST_FILE" {
-					// Handle file request
-					handleFileRequest(conn, peerAddr, payload)
-				} else if messageType == "LIST_FILES" {
-					// Handle file list request
-					handleListFilesRequest(conn)
-				} else if messageType == "FILE_HEADER" || messageType == "FILE_CHUNK" || messageType == "FILE_END" {
-					// Handle file transfer messages
-					handleSecureFileTransfer(peerID, messageType, payload)
+			// Add more detailed logging to understand what we received
+			fmt.Printf("DEBUG: Secure message result: %+v\n", result)
+
+			if result != nil {
+				if result["status"] == "message_received" {
+					// Get message details
+					messageType, typeOk := result["type"].(string)
+					payload, payloadOk := result["payload"].(string)
+					peerID, peerOk := result["peer_id"].(string)
+
+					if !typeOk || !payloadOk || !peerOk {
+						fmt.Printf("Invalid secure message format\n")
+						continue
+					}
+					if messageType == "REQUEST_FILE" {
+						// Handle file request
+						handleFileRequest(conn, peerAddr, payload)
+					} else if messageType == "LIST_FILES" {
+						// Handle file list request
+						handleListFilesRequest(conn)
+					} else if messageType == "FILE_HEADER" || messageType == "FILE_CHUNK" || messageType == "FILE_END" {
+						// Handle file transfer messages
+						handleSecureFileTransfer(peerID, messageType, payload)
+					} else {
+						fmt.Printf("Unknown secure message type: %s\n", messageType)
+					}
+				} else if result["status"] == "secure_channel_established" {
+					// New code to handle the secure channel established case
+					fmt.Printf("Secure channel established with peer %s\n", result["peer_id"])
+
+					// After a channel is established, we might need to wait for the next secure message
+					// You could start a goroutine here to handle subsequent messages
 				} else {
-					fmt.Printf("Unknown secure message type: %s\n", messageType)
+					fmt.Printf("Unhandled secure message status: %s\n", result["status"])
 				}
 				continue
-
 			}
 		}
 

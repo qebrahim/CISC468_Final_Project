@@ -552,14 +552,81 @@ func GetSecureChannel(peerID string) *SecureChannel {
 
 // HandleSecureMessage processes secure protocol messages
 func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string]interface{}, error) {
+	// Debug the inputs to see what's coming in
+	fmt.Printf("DEBUG: HandleSecureMessage called with addr='%s', message='%s'\n", addr, message)
+
+	// If addr is actually the message content, extract the real address from the connection
+	if strings.HasPrefix(addr, "SECURE:") {
+		// We've been passed the message in the addr parameter
+		fmt.Printf("DEBUG: Detected incorrect parameter order\n")
+
+		// Get the real address from the connection
+		realAddr := ""
+		if conn != nil && conn.RemoteAddr() != nil {
+			realAddr = conn.RemoteAddr().String()
+		}
+
+		// Swap parameters
+		temp := addr
+		addr = realAddr
+		if !strings.HasPrefix(message, "SECURE:") {
+			message = temp // Only swap if message doesn't already look like a message
+		}
+
+		fmt.Printf("DEBUG: After correction: addr='%s', message='%s'\n", addr, message)
+	}
+
 	parts := strings.SplitN(message, ":", 3)
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("invalid secure message format: %s", message)
 	}
 
+	fmt.Printf("DEBUG: Message parts: %v\n", parts)
+
 	secureCommand := parts[1]
 	payload := parts[2]
 
+	// Important: Extract host and port from addr properly
+	var host, port string
+	if addr != "" && strings.Contains(addr, ":") {
+		// For IPv4 addresses
+		hostPort := strings.Split(addr, ":")
+		if len(hostPort) >= 2 {
+			host = hostPort[0]
+			port = hostPort[1]
+		} else {
+			// Handle invalid format
+			return nil, fmt.Errorf("invalid address format: %s", addr)
+		}
+	} else {
+		// In case addr is passed in a non-standard format or empty
+		if conn != nil && conn.RemoteAddr() != nil {
+			// Try to get the address from the connection
+			remoteAddr := conn.RemoteAddr().String()
+			hostPort := strings.Split(remoteAddr, ":")
+			if len(hostPort) >= 2 {
+				host = hostPort[0]
+				port = hostPort[1]
+			} else {
+				// Still invalid, use a default
+				host = addr
+				port = "12345" // Default port
+			}
+		} else {
+			// Use what we have as a fallback
+			host = addr
+			port = "12345" // Default port
+		}
+	}
+
+	// Use the standard port format for address lookups
+	standardAddr := fmt.Sprintf("%s:12345", host)
+
+	// After extracting host and port
+	fmt.Printf("DEBUG: Extracted host: %s, port: %s\n", host, port)
+	fmt.Printf("DEBUG: Using standard address: %s\n", standardAddr)
+
+	// Rest of your function...
 	switch secureCommand {
 	case "EXCHANGE":
 		// Handle key exchange request
@@ -585,7 +652,7 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 		if len(hostPort) != 2 {
 			return nil, fmt.Errorf("invalid address format: %s", addr)
 		}
-		standardAddr := fmt.Sprintf("%s:12345", hostPort[0])
+		standardAddr = fmt.Sprintf("%s:12345", hostPort[0])
 
 		_, isTrusted := contactManager.GetContactByAddress(standardAddr)
 		if !isTrusted {
