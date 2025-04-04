@@ -1056,11 +1056,11 @@ func handleFileRequest(conn net.Conn, peerAddr, filename string) {
 	var filePath string
 
 	// First check if the requested file matches any shared file by basename
+	isAlreadyShared := false
 	basename := filepath.Base(filename)
 	for _, path := range sharedFiles {
 		if filepath.Base(path) == basename {
-			found = true
-			filePath = path
+			isAlreadyShared = true
 			break
 		}
 	}
@@ -1096,11 +1096,30 @@ func handleFileRequest(conn net.Conn, peerAddr, filename string) {
 		}
 	}
 
-	// Ask for user consent
-	fmt.Printf("\nAllow %s to download %s? (y/n): ", displayPeer, filename)
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	consent := scanner.Text()
+	// Also check if file is in the default shared directory
+	if !isAlreadyShared {
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			sharedPath := filepath.Join(homeDir, ".p2p-share", "shared", basename)
+			if _, err := os.Stat(sharedPath); err == nil {
+				isAlreadyShared = true
+			}
+		}
+	}
+
+	// Skip asking for consent if the file is already shared
+	consent := "n"
+	if isAlreadyShared {
+		fmt.Printf("\nAuto-sharing file '%s' with %s (file is already in shared list)\n",
+			filename, displayPeer)
+		consent = "y"
+	} else {
+		// Ask for user consent for files not in the shared list
+		fmt.Printf("\nAllow %s to download %s? (y/n): ", displayPeer, filename)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		consent = scanner.Text()
+	}
 
 	if strings.ToLower(consent) != "y" {
 		conn.Write([]byte("ERR:REQUEST_DENIED"))
