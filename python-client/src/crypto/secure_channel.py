@@ -176,14 +176,47 @@ class SecureChannel:
             logger.error(f"Error handling exchange response: {e}")
             return False
     
-    def _derive_shared_secret(self):
-        """Derive shared secret using ECDHE with detailed debug"""
-        try:
-            # Log the inputs to key derivation
-            logger.error(f"Deriving shared secret - is_initiator: {self.is_initiator}")
-            logger.error(f"My private key type: {type(self.private_key).__name__}")
-            logger.error(f"Peer public key type: {type(self.peer_public_key).__name__}")
+    def deriveKey(secret, salt, length):
+        """
+        Python implementation of Go's deriveKey function.
+        This needs to match the Go implementation exactly.
+        """
+        import hashlib
+        
+        # If no salt provided, use a fixed salt
+        if salt is None or len(salt) == 0:
+            salt = b"p2p-file-sharing-salt"
+        
+        # Use SHA-256 for key derivation
+        hash_obj = hashlib.sha256()
+        hash_obj.update(secret)
+        hash_obj.update(salt)
+        
+        # Get the hash result
+        derived = hash_obj.digest()
+        
+        # If we need a key shorter than hash output, truncate
+        if length <= len(derived):
+            return derived[:length]
+        
+        # For longer keys, keep hashing with a counter
+        result = derived
+        counter = 0
+        
+        while len(result) < length:
+            hash_obj = hashlib.sha256()
+            hash_obj.update(derived)
+            hash_obj.update(bytes([counter]))
+            counter += 1
             
+            derived = hash_obj.digest()
+            result += derived
+        
+        return result[:length]
+
+    def _derive_shared_secret(self):
+        """Derive shared secret using ECDHE - fixed to match Go implementation"""
+        try:
             # Compute shared secret
             shared_secret = self.private_key.exchange(
                 ec.ECDH(),
@@ -193,55 +226,42 @@ class SecureChannel:
             logger.error(f"Shared secret length: {len(shared_secret)}")
             logger.error(f"Shared secret (hex): {shared_secret.hex()}")
             
-            # Use HKDF to derive two separate keys for each direction
-            # We use different info values to derive different keys for each direction
+            # Use Go-compatible key derivation function
             if self.is_initiator:
-                logger.error("Deriving keys as initiator")
-                
                 # Initiator uses first key for sending, second for receiving
-                info1 = b"initiator_to_responder"
-                info2 = b"responder_to_initiator"
+                self.encryption_key = deriveKey(
+                    shared_secret,
+                    b"initiator_to_responder",
+                    32
+                )
                 
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,  # 256 bits for AES-256
-                    salt=None,
-                    info=info1
-                ).derive(shared_secret)
+                self.decryption_key = deriveKey(
+                    shared_secret,
+                    b"responder_to_initiator",
+                    32
+                )
                 
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=info2
-                ).derive(shared_secret)
+                logger.error("Derived keys as initiator (Go-compatible)")
             else:
-                logger.error("Deriving keys as responder")
-                
                 # Responder uses first key for receiving, second for sending
-                info1 = b"initiator_to_responder"
-                info2 = b"responder_to_initiator"
+                self.decryption_key = deriveKey(
+                    shared_secret,
+                    b"initiator_to_responder",
+                    32
+                )
                 
-                self.decryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=info1
-                ).derive(shared_secret)
+                self.encryption_key = deriveKey(
+                    shared_secret,
+                    b"responder_to_initiator",
+                    32
+                )
                 
-                self.encryption_key = HKDF(
-                    algorithm=hashes.SHA256(),
-                    length=32,
-                    salt=None,
-                    info=info2
-                ).derive(shared_secret)
+                logger.error("Derived keys as responder (Go-compatible)")
             
             logger.error(f"Encryption key (hex): {self.encryption_key.hex()}")
             logger.error(f"Decryption key (hex): {self.decryption_key.hex()}")
             
             # Clear the private key for forward secrecy
-            # Once we've derived the shared secret, we don't need the private key anymore
-            # This ensures forward secrecy even if the device is compromised later
             self.private_key = None
             
             return True
