@@ -22,7 +22,6 @@ import (
 )
 
 // SecureChannel implements encrypted communication using ECDHE for forward secrecy
-// SecureChannel implements encrypted communication using ECDHE for forward secrecy
 type SecureChannel struct {
 	PeerID         string
 	Conn           net.Conn
