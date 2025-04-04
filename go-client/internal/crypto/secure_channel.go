@@ -334,6 +334,7 @@ func (sc *SecureChannel) DeriveSharedSecret() error {
 
 	return nil
 }
+
 func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	sc.mutex.Lock()
 	defer sc.mutex.Unlock()
@@ -341,42 +342,80 @@ func (sc *SecureChannel) EncryptMessage(plaintext []byte) (string, error) {
 	if !sc.Established || sc.EncryptionKey == nil {
 		return "", fmt.Errorf("secure channel not established")
 	}
-	// print length ofsc.encryptionkey
-	fmt.Printf("Encrypt: encryption key length: %d\n", len(sc.EncryptionKey))
+
+	// Print debug information
+	fmt.Printf("Go Encrypt Debug: encryption key length: %d\n", len(sc.EncryptionKey))
+	fmt.Printf("Go Encrypt Debug: encryption key (hex): %x\n", sc.EncryptionKey)
+	fmt.Printf("Go Encrypt Debug: plaintext length: %d\n", len(plaintext))
+	fmt.Printf("Go Encrypt Debug: plaintext: %s\n", string(plaintext))
+
 	// Create AES-GCM cipher
 	block, err := aes.NewCipher(sc.EncryptionKey)
 	if err != nil {
+		fmt.Printf("Go Encrypt Error: creating cipher: %v\n", err)
 		return "", fmt.Errorf("error creating cipher: %v", err)
 	}
 
 	// Generate a nonce using the counter
 	nonce := make([]byte, 12)
 	// Use session ID as prefix (first 8 bytes)
-	copy(nonce, []byte(sc.SessionID[:8]))
+	sessionIDBytes := []byte(sc.SessionID[:8])
+	fmt.Printf("Go Encrypt Debug: session ID for nonce: %s\n", sc.SessionID[:8])
+	fmt.Printf("Go Encrypt Debug: session ID bytes for nonce (hex): %x\n", sessionIDBytes)
+
+	copy(nonce, sessionIDBytes)
+
 	// Use counter for the last 4 bytes
-	nonce[8] = byte(sc.SendCounter >> 24)
-	nonce[9] = byte(sc.SendCounter >> 16)
-	nonce[10] = byte(sc.SendCounter >> 8)
-	nonce[11] = byte(sc.SendCounter)
+	counterBytes := make([]byte, 4)
+	counterBytes[0] = byte(sc.SendCounter >> 24)
+	counterBytes[1] = byte(sc.SendCounter >> 16)
+	counterBytes[2] = byte(sc.SendCounter >> 8)
+	counterBytes[3] = byte(sc.SendCounter)
+
+	fmt.Printf("Go Encrypt Debug: counter for nonce: %d\n", sc.SendCounter)
+	fmt.Printf("Go Encrypt Debug: counter bytes for nonce (hex): %x\n", counterBytes)
+
+	copy(nonce[8:], counterBytes)
+	fmt.Printf("Go Encrypt Debug: complete nonce (hex): %x\n", nonce)
 
 	// Create GCM mode
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
+		fmt.Printf("Go Encrypt Error: creating GCM: %v\n", err)
 		return "", fmt.Errorf("error creating GCM: %v", err)
 	}
 
 	// Create additional data (AAD) for authentication
-	aad := []byte(fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter))
+	aadStr := fmt.Sprintf("%s:%s:%d", sc.PeerID, sc.SessionID, sc.SendCounter)
+	aad := []byte(aadStr)
+
+	fmt.Printf("Go Encrypt Debug: AAD string: %s\n", aadStr)
+	fmt.Printf("Go Encrypt Debug: AAD bytes (hex): %x\n", aad)
 
 	// Encrypt the plaintext
 	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
+	fmt.Printf("Go Encrypt Debug: full ciphertext+tag length: %d\n", len(ciphertext))
+
+	// GCM tag is always at the end, standard length is 16 bytes
+	tagStart := len(ciphertext) - 16
+	tag := ciphertext[tagStart:]
+	actualCiphertext := ciphertext[:tagStart]
+
+	fmt.Printf("Go Encrypt Debug: actual ciphertext length: %d\n", len(actualCiphertext))
+	fmt.Printf("Go Encrypt Debug: tag length: %d\n", len(tag))
+	fmt.Printf("Go Encrypt Debug: tag (hex): %x\n", tag)
 
 	// Increment the counter
 	sc.SendCounter++
 
 	// Format: base64(nonce) + ":" + base64(ciphertext)
-	encryptedMessage := base64.StdEncoding.EncodeToString(nonce) + ":" +
-		base64.StdEncoding.EncodeToString(ciphertext)
+	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
+	ciphertextB64 := base64.StdEncoding.EncodeToString(ciphertext)
+	encryptedMessage := nonceB64 + ":" + ciphertextB64
+
+	fmt.Printf("Go Encrypt Debug: nonce base64: %s\n", nonceB64)
+	fmt.Printf("Go Encrypt Debug: ciphertext+tag base64: %s\n", ciphertextB64)
+	fmt.Printf("Go Encrypt Debug: final encrypted message: %s\n", encryptedMessage)
 
 	return encryptedMessage, nil
 }

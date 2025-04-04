@@ -304,152 +304,112 @@ class SecureChannel:
         except Exception as e:
             logger.error(f"Error encrypting message: {e}")
             return None
+    
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-GCM"""
+        """Decrypt a message using AES-GCM with fixes for Go compatibility"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
         
         try:
-            logger.error(f"Decryption key length: {len(self.decryption_key)}")
-            logger.error(f"Decryption key (hex): {self.decryption_key.hex()}")
-            logger.error(f"Encrypted message format: {encrypted_message}")
+            logger.info(f"Decrypting message with key length: {len(self.decryption_key)}")
             
             # Parse the encrypted message
             parts = encrypted_message.split(":")
-            logger.error(f"Decrypt: got {len(parts)} parts, expecting 2")
-            
             if len(parts) != 2:
                 logger.error(f"Invalid encrypted message format: got {len(parts)} parts")
-                # Try to log the message structure
-                for i, part in enumerate(parts):
-                    try:
-                        logger.error(f"Part {i}: {part[:30]}... (length: {len(part)})")
-                    except:
-                        logger.error(f"Part {i}: Unable to print")
                 return None
             
             nonce = base64.b64decode(parts[0])
-            logger.error(f"Nonce length: {len(nonce)}")
-            logger.error(f"Nonce (hex): {nonce.hex()}")
+            logger.info(f"Nonce (hex): {nonce.hex()}")
             
             encrypted_data = base64.b64decode(parts[1])
-            logger.error(f"Encrypted data length: {len(encrypted_data)}")
+            logger.info(f"Encrypted data length: {len(encrypted_data)}")
             
-            # In AES-GCM, the tag is typically the last 16 bytes
+            # In AES-GCM, the tag is the last 16 bytes
             ciphertext = encrypted_data[:-16]
             tag = encrypted_data[-16:]
+            logger.info(f"Ciphertext length: {len(ciphertext)}, Tag (hex): {tag.hex()}")
             
-            logger.error(f"Ciphertext length: {len(ciphertext)}")
-            logger.error(f"Tag (hex): {tag.hex()}")
+            # Try multiple AAD approaches
+            attempts = [
+                # 1. Try No AAD first
+                {
+                    "name": "No AAD",
+                    "aad": None
+                },
+                # 2. Standard AAD with full session ID
+                {
+                    "name": "Standard AAD with full session ID",
+                    "aad": f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+                },
+                # 3. AAD with truncated session ID (matching nonce)
+                {
+                    "name": "AAD with truncated session ID",
+                    "aad": f"{self.peer_id}:{self.session_id[:8]}:{self.receive_counter}".encode('utf-8')
+                },
+                # 4. AAD with different format
+                {
+                    "name": "Alternative AAD format",
+                    "aad": f"{self.peer_id}|{self.session_id}|{self.receive_counter}".encode('utf-8')
+                }
+            ]
             
-            # Log Associated Authenticated Data calculation
-            peer_id_str = self.peer_id
-            session_id_str = self.session_id
-            counter_int = self.receive_counter
+            # Try each approach
+            for attempt in attempts:
+                try:
+                    logger.info(f"Trying decryption with {attempt['name']}")
+                    
+                    # Create new cipher for each attempt
+                    cipher = Cipher(
+                        algorithms.AES(self.decryption_key),
+                        modes.GCM(nonce, tag),
+                        backend=default_backend()
+                    )
+                    decryptor = cipher.decryptor()
+                    
+                    # Add AAD if specified
+                    if attempt["aad"]:
+                        logger.info(f"Using AAD: {attempt['aad']}")
+                        decryptor.authenticate_additional_data(attempt["aad"])
+                    
+                    # Decrypt
+                    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                    
+                    # If we get here, decryption was successful
+                    logger.info(f"SUCCESS with {attempt['name']}! Decrypted message: {plaintext[:50]}")
+                    self.receive_counter += 1
+                    return plaintext
+                    
+                except Exception as e:
+                    logger.info(f"Failed with {attempt['name']}: {e}")
+                    continue
             
-            logger.error(f"AAD components - peer_id: {peer_id_str}, session_id: {session_id_str}, counter: {counter_int}")
-            
-            # Format the AAD the same way Go does it
-            go_style_aad = f"{peer_id_str}:{session_id_str}:{counter_int}".encode('utf-8')
-            logger.error(f"Go-style AAD: {go_style_aad}")
-            logger.error(f"Go-style AAD (hex): {go_style_aad.hex()}")
-            
-            # Try different AAD approaches
-            
-            # 1. First try with no AAD
-            logger.error("ATTEMPT 1: Decrypting without AAD")
+            # Special case: try directly with the raw encrypted data
             try:
-                cipher = Cipher(
-                    algorithms.AES(self.decryption_key),
-                    modes.GCM(nonce, tag),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
+                logger.info("Trying direct GCM Open approach")
                 
-                # No AAD for first attempt
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                logger.error("SUCCESS: Decryption without AAD worked!")
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                aesgcm = AESGCM(self.decryption_key)
+                aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+                
+                plaintext = aesgcm.decrypt(nonce, encrypted_data, aad)
+                logger.info(f"SUCCESS with direct GCM Open!")
                 self.receive_counter += 1
                 return plaintext
+                
             except Exception as e:
-                logger.error(f"FAILED: Decryption without AAD: {e}")
+                logger.info(f"Failed with direct GCM Open: {e}")
             
-            # 2. Try with Go-style AAD
-            logger.error("ATTEMPT 2: Decrypting with Go-style AAD")
-            try:
-                cipher = Cipher(
-                    algorithms.AES(self.decryption_key),
-                    modes.GCM(nonce, tag),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
-                
-                # Use the Go-style AAD
-                decryptor.authenticate_additional_data(go_style_aad)
-                
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                logger.error("SUCCESS: Decryption with Go-style AAD worked!")
-                self.receive_counter += 1
-                return plaintext
-            except Exception as e:
-                logger.error(f"FAILED: Decryption with Go-style AAD: {e}")
-            
-            # 3. Try with session_id as bytes directly
-            logger.error("ATTEMPT 3: Using session_id bytes directly")
-            try:
-                session_bytes = self.session_id[:8].encode('utf-8')
-                logger.error(f"Session bytes: {session_bytes.hex()}")
-                aad = f"{self.peer_id}:{self.session_id[:8]}:{self.receive_counter}".encode('utf-8')
-                
-                cipher = Cipher(
-                    algorithms.AES(self.decryption_key),
-                    modes.GCM(nonce, tag),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
-                decryptor.authenticate_additional_data(aad)
-                
-                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-                logger.error("SUCCESS: Decryption with session_id bytes worked!")
-                self.receive_counter += 1
-                return plaintext
-            except Exception as e:
-                logger.error(f"FAILED: Decryption with session_id bytes: {e}")
-            
-            # 4. Try with raw binary tag directly from ciphertext
-            logger.error("ATTEMPT 4: Using raw binary tag")
-            try:
-                # Just to be safe, try without separating tag and ciphertext
-                cipher = Cipher(
-                    algorithms.AES(self.decryption_key),
-                    modes.GCM(nonce),
-                    backend=default_backend()
-                )
-                decryptor = cipher.decryptor()
-                
-                # Use original encrypted data without separating
-                plaintext = decryptor.update(encrypted_data) + decryptor.finalize()
-                logger.error("SUCCESS: Decryption with raw binary tag worked!")
-                self.receive_counter += 1
-                return plaintext
-            except Exception as e:
-                logger.error(f"FAILED: Decryption with raw binary tag: {e}")
-                
-            # If nothing worked, print key derivation details
-            logger.error("All decryption attempts failed. Dumping key derivation info:")
-            logger.error(f"Session ID used for key derivation: {self.session_id}")
-            logger.error(f"Is initiator: {self.is_initiator}")
-            logger.error(f"Receive counter value: {self.receive_counter}")
-            
-            raise Exception("All decryption attempts failed - see logs for details")
+            # If we get here, all attempts failed
+            logger.error("All decryption attempts failed")
+            return None
             
         except Exception as e:
             logger.error(f"Error decrypting message: {e}")
             import traceback
             traceback.print_exc()
             return None
-    
     
     
     def send_encrypted(self, message_type, payload):
