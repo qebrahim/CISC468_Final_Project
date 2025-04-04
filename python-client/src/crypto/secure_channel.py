@@ -786,3 +786,40 @@ def establish_secure_channel(peer_id, peer_addr):
     except Exception as e:
         logger.error(f"Error establishing secure channel: {e}")
         return {"status": "error", "message": str(e)}
+def deriveKey(secret, salt, length):
+        """
+        Python implementation of Go's deriveKey function.
+        This needs to match the Go implementation exactly.
+        """
+        import hashlib
+        
+        # If no salt provided, use a fixed salt
+        if salt is None or len(salt) == 0:
+            salt = b"p2p-file-sharing-salt"
+        
+        # Use SHA-256 for key derivation
+        hash_obj = hashlib.sha256()
+        hash_obj.update(secret)
+        hash_obj.update(salt)
+        
+        # Get the hash result
+        derived = hash_obj.digest()
+        
+        # If we need a key shorter than hash output, truncate
+        if length <= len(derived):
+            return derived[:length]
+        
+        # For longer keys, keep hashing with a counter
+        result = derived
+        counter = 0
+        
+        while len(result) < length:
+            hash_obj = hashlib.sha256()
+            hash_obj.update(derived)
+            hash_obj.update(bytes([counter]))
+            counter += 1
+            
+            derived = hash_obj.digest()
+            result += derived
+        
+        return result[:length]
