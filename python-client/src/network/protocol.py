@@ -1098,8 +1098,41 @@ def request_file(host, port, filename, use_secure=False):
                 logger.info(f"Establishing secure channel with {peer_id}...")
                 result = establish_secure_channel(peer_id, f"{host}:{port}")
 
-                if result["status"] != "initiated":
-                    logger.error("Failed to initiate secure channel")
+                def wait_for_secure_channel(peer_id, max_wait=5):
+                    """Wait for a secure channel to be established"""
+                    import time
+                    start = time.time()
+
+                    while time.time() - start < max_wait:
+                        from crypto.secure_channel import get_secure_channel
+                        channel = get_secure_channel(peer_id)
+
+                        if channel and channel.established:
+                            logger.info(
+                                f"Secure channel established with peer {peer_id}")
+                            return channel
+
+                        time.sleep(0.5)  # Check every half second
+
+                    logger.error(
+                        f"Timed out waiting for secure channel with peer {peer_id}")
+                    return None
+
+                # Process the result
+                if result["status"] == "established":
+                    logger.info(
+                        f"Secure channel established successfully with {peer_id}")
+                    # Get the channel directly from the result
+                    channel = result.get("channel")
+                    if channel and channel.established:
+                        return channel.send_encrypted("REQUEST_FILE", filename)
+                    else:
+                        logger.error(
+                            "Channel object not available or not established")
+                        return False
+                else:
+                    logger.error(
+                        f"Failed to establish secure channel: {result.get('message', 'Unknown error')}")
                     return False
 
                 # Wait a moment for channel to establish
