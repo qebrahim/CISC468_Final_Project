@@ -37,35 +37,7 @@ This Python client is part of a peer-to-peer secure file sharing application tha
    python src/main.py
    ```
 
-## Directory Structure
 
-```
-python-client
-├── src
-│   ├── __init__.py
-│   ├── main.py
-│   ├── discovery
-│   │   ├── __init__.py
-│   │   └── mdns.py
-│   ├── crypto
-│   │   ├── __init__.py
-│   │   ├── keys.py
-│   │   └── encryption.py
-│   ├── network
-│   │   ├── __init__.py
-│   │   ├── peer.py
-│   │   └── protocol.py
-│   └── storage
-│       ├── __init__.py
-│       └── filemanager.py
-├── tests
-│   ├── __init__.py
-│   ├── test_crypto.py
-│   ├── test_discovery.py
-│   └── test_network.py
-├── requirements.txt
-└── README.md
-```
 
 ## License
 
