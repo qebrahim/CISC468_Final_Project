@@ -29,7 +29,7 @@ func NewSecureStorage() (*SecureStorage, error) {
 		return nil, fmt.Errorf("error getting home directory: %v", err)
 	}
 
-	// Create storage directories
+	// Create storage directories - use 'secure' instead of 'shared' for encrypted files
 	storageDir := filepath.Join(homeDir, ".p2p-share", "secure")
 	keysDir := filepath.Join(homeDir, ".p2p-share", "keys", "secure")
 
@@ -48,8 +48,8 @@ func NewSecureStorage() (*SecureStorage, error) {
 	}, nil
 }
 
-// SecureStoreFile encrypts and stores a file securely
-func (s *SecureStorage) SecureStoreFile(filePath string, passphrase string) (string, error) {
+// Modify the SecureStoreFile function in secure_storage.go to save the key as a base64 encoded string
+func (s *SecureStorage) SecureStoreFile(inputFile string, passphrase string) (string, error) {
 	// Generate a unique ID for the file (timestamp + 8 random bytes)
 	randomID := make([]byte, 8)
 	_, err := rand.Read(randomID)
@@ -61,12 +61,12 @@ func (s *SecureStorage) SecureStoreFile(filePath string, passphrase string) (str
 	uniqueID := fmt.Sprintf("%s_%s", timestamp, base64.URLEncoding.EncodeToString(randomID)[:8])
 
 	// Get the original filename
-	originalName := filepath.Base(filePath)
+	originalName := filepath.Base(inputFile)
 	secureFileName := fmt.Sprintf("%s_%s.enc", strings.TrimSuffix(originalName, filepath.Ext(originalName)), uniqueID)
 	outputPath := filepath.Join(s.StorageDir, secureFileName)
 
 	// Read the file
-	data, err := ioutil.ReadFile(filePath)
+	data, err := ioutil.ReadFile(inputFile)
 	if err != nil {
 		return "", fmt.Errorf("error reading file: %v", err)
 	}
@@ -78,6 +78,11 @@ func (s *SecureStorage) SecureStoreFile(filePath string, passphrase string) (str
 	encryptedData, err := encryptData(data, key)
 	if err != nil {
 		return "", fmt.Errorf("error encrypting data: %v", err)
+	}
+
+	// Create directory if needed
+	if err := os.MkdirAll(s.StorageDir, 0700); err != nil {
+		return "", fmt.Errorf("error creating secure directory: %v", err)
 	}
 
 	// Write encrypted data to output file
@@ -95,19 +100,20 @@ func (s *SecureStorage) SecureStoreFile(filePath string, passphrase string) (str
 			return "", fmt.Errorf("error generating passphrase: %v", err)
 		}
 		passphrase = base64.URLEncoding.EncodeToString(passphraseBytes)
-
-		// Store the passphrase
-		keyPath := filepath.Join(s.KeysDir, secureFileName+".key")
-		err = ioutil.WriteFile(keyPath, []byte(passphrase), 0600)
-		if err != nil {
-			return "", fmt.Errorf("error writing key file: %v", err)
-		}
 	}
 
+	// Store the passphrase as a base64 encoded string
+	keyPath := filepath.Join(s.KeysDir, secureFileName+".key")
+	err = ioutil.WriteFile(keyPath, []byte(passphrase), 0600)
+	if err != nil {
+		return "", fmt.Errorf("error writing key file: %v", err)
+	}
+
+	// Return the path to the encrypted file
 	return outputPath, nil
 }
 
-// SecureRetrieveFile decrypts and retrieves a securely stored file
+// Correspondingly, modify the SecureRetrieveFile function
 func (s *SecureStorage) SecureRetrieveFile(encryptedFilePath, outputPath string, passphrase string) error {
 	// If no passphrase provided, try to load from key file
 	if passphrase == "" {
@@ -285,4 +291,27 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// This function handles on-demand file decryption for temporary access
+func (s *SecureStorage) TemporaryDecrypt(encryptedFilePath string, outputPath string, passphrase string, timeout time.Duration) error {
+	// Decrypt the file
+	err := s.SecureRetrieveFile(encryptedFilePath, outputPath, passphrase)
+	if err != nil {
+		return fmt.Errorf("error decrypting file: %v", err)
+	}
+
+	// Set up automatic deletion after timeout
+	go func() {
+		time.Sleep(timeout)
+		// Delete the temporary decrypted file
+		err := os.Remove(outputPath)
+		if err != nil {
+			fmt.Printf("Warning: Failed to remove temporary decrypted file: %v\n", err)
+		} else {
+			fmt.Printf("Temporary decrypted file removed after timeout: %s\n", outputPath)
+		}
+	}()
+
+	return nil
 }

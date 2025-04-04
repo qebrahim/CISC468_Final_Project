@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
@@ -44,12 +45,381 @@ type SecureFileTransfer struct {
 	TransferKey []byte
 	File        *os.File
 	// New fields
-	IsComplete bool
-	StartTime  time.Time
-	EndTime    time.Time
+	IsComplete    bool
+	StartTime     time.Time
+	EndTime       time.Time
+	AutoEncrypt   bool
+	EncryptedPath string
+	StorageKey    []byte
 }
 
 var secureFileTransfers = make(map[string]*SecureFileTransfer)
+var fileTransferMutex sync.Mutex
+
+// This function handles the end of a file transfer with automatic encryption
+func finalizeSecureFileTransfer(transfer *SecureFileTransfer, peerID string) {
+	// Close the file
+	if transfer.File != nil {
+		transfer.File.Close()
+		transfer.File = nil
+	}
+
+	filename := transfer.Filename
+	filepath := transfer.Path
+	received := transfer.Received
+	expected := transfer.Size
+	filehash := transfer.Hash
+
+	// Check if we received all the data
+	if int64(received) < expected {
+		fmt.Printf("\nWarning: Incomplete file transfer: %d/%d bytes\n", received, expected)
+	} else {
+		fmt.Printf("\nFile transfer complete: %s\n", filename)
+	}
+
+	// Verify hash if available
+	if hashManager != nil && filehash != "" {
+		verified, err := hashManager.VerifyFileHash(filepath, filehash)
+		if err != nil || !verified {
+			fmt.Printf("File verification failed: %v\n", err)
+		} else {
+			fmt.Printf("File integrity verified successfully\n")
+
+			// Add hash to our database
+			hashManager.AddFileHash(filename, filepath, peerID)
+		}
+	}
+
+	// Automatically encrypt the file for secure storage
+	if transfer.AutoEncrypt {
+		// Generate a random storage key if not provided
+		if transfer.StorageKey == nil {
+			var err error
+			transfer.StorageKey, err = crypto.GenerateRandomKey(32)
+			if err != nil {
+				fmt.Printf("Error generating storage key: %v\n", err)
+				// Continue without encryption if key generation fails
+				return
+			}
+		}
+
+		// Create secure storage if not initialized
+		if secureStorage == nil {
+			var err error
+			secureStorage, err = storage.NewSecureStorage()
+			if err != nil {
+				fmt.Printf("Error initializing secure storage: %v\n", err)
+				return
+			}
+		}
+
+		// Store the key for future use
+		keyPath := filepath + ".key"
+		err := ioutil.WriteFile(keyPath, transfer.StorageKey, 0600)
+		if err != nil {
+			fmt.Printf("Error saving encryption key: %v\n", err)
+			return
+		}
+
+		// Encrypt the file
+		outputPath, err := secureStorage.SecureStoreFile(filepath, string(transfer.StorageKey))
+		if err != nil {
+			fmt.Printf("Error encrypting file for storage: %v\n", err)
+			return
+		}
+
+		// Store the encrypted path
+		transfer.EncryptedPath = outputPath
+		fmt.Printf("File encrypted and stored securely at: %s\n", outputPath)
+
+		// Remove the unencrypted file
+		err = os.Remove(filepath)
+		if err != nil {
+			fmt.Printf("Error removing unencrypted file: %v\n", err)
+		}
+	}
+
+	// Add to shared files list
+	absPath := transfer.Path
+	if !contains(sharedFiles, absPath) {
+		sharedFiles = append(sharedFiles, absPath)
+	}
+}
+
+func handleSecureFileEnd(peerID string, payload string) {
+	fmt.Printf("\nFile transfer from %s completed\n", peerID)
+
+	fileTransferMutex.Lock()
+	transfer, exists := secureFileTransfers[peerID]
+	fileTransferMutex.Unlock()
+
+	if !exists {
+		fmt.Printf("No active file transfer for peer %s\n", peerID)
+		return
+	}
+
+	// Set auto-encrypt to true to enable secure storage
+	transfer.AutoEncrypt = true
+
+	// Close the file handle to ensure all data is written and the file is ready for encryption
+	if transfer.File != nil {
+		transfer.File.Close()
+		transfer.File = nil
+	}
+
+	// Finalize the transfer with automatic encryption
+	finalizeSecureFileTransfer(transfer, peerID)
+
+	// Clean up
+	fileTransferMutex.Lock()
+	delete(secureFileTransfers, peerID)
+	fileTransferMutex.Unlock()
+
+	fmt.Printf("\nFile download complete and securely stored\n")
+}
+
+// Add a new function to main.go for accessing securely stored files
+func accessSecureFile(encryptedPath string, timeout time.Duration) (string, error) {
+	// Generate a temporary path for the decrypted file
+	tempDir := os.TempDir()
+	basename := filepath.Base(encryptedPath)
+	originalName := strings.TrimSuffix(basename, ".enc")
+	tempPath := filepath.Join(tempDir, originalName)
+
+	// Find the key file
+	keyPath := strings.TrimSuffix(encryptedPath, ".enc") + ".key"
+	keyData, err := ioutil.ReadFile(keyPath)
+	if err != nil {
+		return "", fmt.Errorf("error reading key file: %v", err)
+	}
+
+	// Decrypt the file temporarily
+	if secureStorage == nil {
+		var initErr error
+		secureStorage, initErr = storage.NewSecureStorage()
+		if initErr != nil {
+			return "", fmt.Errorf("error initializing secure storage: %v", initErr)
+		}
+	}
+
+	err = secureStorage.TemporaryDecrypt(encryptedPath, tempPath, string(keyData), timeout)
+	if err != nil {
+		return "", fmt.Errorf("error decrypting file: %v", err)
+	}
+
+	fmt.Printf("File temporarily decrypted at %s (will be deleted after %v)\n", tempPath, timeout)
+	return tempPath, nil
+}
+
+func handleAccessSecureFile(scanner *bufio.Scanner) {
+	if secureStorage == nil {
+		fmt.Println("Secure storage is not available")
+		return
+	}
+
+	// List encrypted files
+	files, err := secureStorage.ListSecureFiles()
+	if err != nil {
+		fmt.Printf("Error listing secure files: %v\n", err)
+		return
+	}
+
+	if len(files) == 0 {
+		fmt.Println("No securely stored files found")
+		return
+	}
+
+	fmt.Println("\nSecurely stored files:")
+	for i, file := range files {
+		// Extract the original filename by removing the .enc extension and unique ID
+		basename := filepath.Base(file)
+		nameParts := strings.Split(basename, "_")
+		var displayName string
+		if len(nameParts) > 1 {
+			// Remove the unique ID and '.enc' extension
+			displayName = strings.TrimSuffix(nameParts[0], filepath.Ext(nameParts[0])) + filepath.Ext(file)
+		} else {
+			displayName = basename
+		}
+		fmt.Printf("%d. %s\n", i+1, displayName)
+	}
+
+	fmt.Print("\nEnter file number to access: ")
+	scanner.Scan()
+	fileIdxStr := scanner.Text()
+	fileIdx, err := strconv.Atoi(fileIdxStr)
+	if err != nil || fileIdx < 1 || fileIdx > len(files) {
+		fmt.Println("Invalid file selection")
+		return
+	}
+
+	selectedFile := files[fileIdx-1]
+
+	// Find the corresponding key file with more flexible matching
+	keyDir := filepath.Join(filepath.Dir(selectedFile), "..", "keys", "secure")
+
+	// Try to find the key file
+	var keyFilePath string
+	err = filepath.Walk(keyDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Check if the filename contains the encrypted filename
+		if strings.Contains(info.Name(), filepath.Base(selectedFile)) && strings.HasSuffix(info.Name(), ".key") {
+			keyFilePath = path
+			return filepath.SkipDir // Stop walking once we find the key
+		}
+		return nil
+	})
+
+	if err != nil || keyFilePath == "" {
+		fmt.Printf("Error finding key file for %s: %v\n", selectedFile, err)
+		return
+	}
+
+	keyData, err := ioutil.ReadFile(keyFilePath)
+	if err != nil {
+		fmt.Printf("Error reading key file: %v\n", err)
+		return
+	}
+
+	// Ask for output path
+	fmt.Print("Enter output path (leave empty for default): ")
+	scanner.Scan()
+	outputPath := scanner.Text()
+
+	// If no output path specified, create one in the shared directory
+	if outputPath == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("Error getting home directory: %v\n", err)
+			return
+		}
+
+		// Create shared directory if it doesn't exist
+		sharedDir := filepath.Join(homeDir, ".p2p-share", "shared")
+		err = os.MkdirAll(sharedDir, 0755)
+		if err != nil {
+			fmt.Printf("Error creating shared directory: %v\n", err)
+			return
+		}
+
+		// Extract original filename
+		basename := filepath.Base(selectedFile)
+		nameParts := strings.Split(basename, "_")
+		var outputFilename string
+		if len(nameParts) > 1 {
+			// Remove the unique ID and '.enc' extension
+			outputFilename = strings.TrimSuffix(nameParts[0], filepath.Ext(nameParts[0])) + filepath.Ext(selectedFile)
+		} else {
+			outputFilename = basename
+		}
+
+		outputPath = filepath.Join(sharedDir, outputFilename)
+	}
+
+	// Decrypt the file
+	err = secureStorage.SecureRetrieveFile(selectedFile, outputPath, string(keyData))
+	if err != nil {
+		fmt.Printf("Error decrypting file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("File successfully decrypted to: %s\n", outputPath)
+}
+
+func encryptExistingFile(scanner *bufio.Scanner) {
+	// List files in shared directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("Error getting home directory: %v\n", err)
+		return
+	}
+
+	sharedDir := filepath.Join(homeDir, ".p2p-share", "shared")
+	files, err := os.ReadDir(sharedDir)
+	if err != nil {
+		fmt.Printf("Error reading shared directory: %v\n", err)
+		return
+	}
+
+	if len(files) == 0 {
+		fmt.Println("No files in shared directory")
+		return
+	}
+
+	fmt.Println("\nFiles in shared directory:")
+	for i, file := range files {
+		if !file.IsDir() {
+			fmt.Printf("%d. %s\n", i+1, file.Name())
+		}
+	}
+
+	fmt.Print("\nEnter file number to encrypt: ")
+	scanner.Scan()
+	fileIdxStr := scanner.Text()
+	fileIdx, err := strconv.Atoi(fileIdxStr)
+	if err != nil || fileIdx < 1 || fileIdx > len(files) {
+		fmt.Println("Invalid file selection")
+		return
+	}
+
+	selectedFile := files[fileIdx-1]
+	if selectedFile.IsDir() {
+		fmt.Println("Cannot encrypt a directory")
+		return
+	}
+
+	filePath := filepath.Join(sharedDir, selectedFile.Name())
+
+	// Initialize secure storage if needed
+	if secureStorage == nil {
+		secureStorage, err = storage.NewSecureStorage()
+		if err != nil {
+			fmt.Printf("Error initializing secure storage: %v\n", err)
+			return
+		}
+	}
+
+	// Generate a random storage key
+	storageKey, err := crypto.GenerateRandomKey(32)
+	if err != nil {
+		fmt.Printf("Error generating storage key: %v\n", err)
+		return
+	}
+
+	// Store the key
+	keyPath := filePath + ".key"
+	err = ioutil.WriteFile(keyPath, storageKey, 0600)
+	if err != nil {
+		fmt.Printf("Error saving encryption key: %v\n", err)
+		return
+	}
+
+	// Encrypt the file
+	outputPath, err := secureStorage.SecureStoreFile(filePath, string(storageKey))
+	if err != nil {
+		fmt.Printf("Error encrypting file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("File encrypted and stored at: %s\n", outputPath)
+
+	// Ask if user wants to remove the original unencrypted file
+	fmt.Print("Remove original unencrypted file? (y/n): ")
+	scanner.Scan()
+	removeOriginal := scanner.Text()
+
+	if strings.ToLower(removeOriginal) == "y" {
+		err = os.Remove(filePath)
+		if err != nil {
+			fmt.Printf("Error removing original file: %v\n", err)
+		} else {
+			fmt.Println("Removed original unencrypted file")
+		}
+	}
+}
 
 func main() {
 	// Initialize
@@ -242,6 +612,10 @@ func runCommandLineInterface() {
 		case "9":
 			handleKeyMigration(scanner)
 		case "10":
+			handleAccessSecureFile(scanner)
+		case "11":
+			encryptExistingFile(scanner) // New option
+		case "12":
 			fmt.Println("Exiting application...")
 			gracefulShutdown()
 			return
@@ -262,7 +636,9 @@ func displayMenu() {
 	fmt.Println("7. Establish secure channel")
 	fmt.Println("8. Secure storage")
 	fmt.Println("9. Key migration")
-	fmt.Println("10. Exit")
+	fmt.Println("10. Access secure file")
+	fmt.Println("11. Encrypt existing file") // New option
+	fmt.Println("12. Exit")
 }
 
 func listConnectedPeers() {
@@ -1865,12 +2241,47 @@ func requestFileRegular(host string, port int, filename string) {
 		}
 	}
 
-	fmt.Printf("File downloaded successfully to %s\n", savePath)
-
 	// Add to shared files list
 	absPath, _ := filepath.Abs(savePath)
 	if !contains(sharedFiles, absPath) {
 		sharedFiles = append(sharedFiles, absPath)
+	}
+
+	// NEW CODE: Automatically encrypt the file after download for secure storage
+	if secureStorage != nil {
+		fmt.Println("Encrypting file for secure storage...")
+
+		// Generate a random storage key
+		storageKey, err := crypto.GenerateRandomKey(32)
+		if err != nil {
+			fmt.Printf("Error generating storage key: %v\n", err)
+			return
+		}
+
+		// Store the key for future use
+		keyPath := savePath + ".key"
+		err = ioutil.WriteFile(keyPath, storageKey, 0600)
+		if err != nil {
+			fmt.Printf("Error saving encryption key: %v\n", err)
+			return
+		}
+
+		// Encrypt the file
+		outputPath, err := secureStorage.SecureStoreFile(savePath, string(storageKey))
+		if err != nil {
+			fmt.Printf("Error encrypting file for storage: %v\n", err)
+			return
+		}
+
+		fmt.Printf("File encrypted and stored securely at: %s\n", outputPath)
+
+		// Remove the unencrypted file
+		err = os.Remove(savePath)
+		if err != nil {
+			fmt.Printf("Error removing unencrypted file: %v\n", err)
+		} else {
+			fmt.Println("Removed unencrypted version")
+		}
 	}
 }
 
