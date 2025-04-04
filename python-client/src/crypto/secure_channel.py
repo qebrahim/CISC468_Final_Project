@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Global registry of secure channels
 secure_channels = {}
+conn_to_peer_id = {}
 
 class SecureChannel:
     """
@@ -581,6 +582,10 @@ def handle_secure_message(conn, addr, message):
                 contact = {"peer_id": extracted_peer_id}
             else:
                 return {"status": "not_authenticated"}
+        if extracted_peer_id:
+            conn_id = id(conn)
+            conn_to_peer_id[conn_id] = extracted_peer_id
+            logger.info(f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
         
         # Prioritize the extracted peer ID
         peer_id = extracted_peer_id or contact["peer_id"]
@@ -636,10 +641,11 @@ def handle_secure_message(conn, addr, message):
                 
                 
                 conn_id = id(conn)
-                mapped_peer_id = handle_secure_message.conn_to_peer_id.get(conn_id)
-            
+                mapped_peer_id = conn_to_peer_id.get(conn_id)
+        
                 if mapped_peer_id:
                     logger.info(f"Using mapped peer ID for DATA: {mapped_peer_id}")
+                    peer_id = mapped_peer_id
                     channel = get_secure_channel(mapped_peer_id)
                 else:
                     logger.info(f"Using default peer ID: {peer_id}")

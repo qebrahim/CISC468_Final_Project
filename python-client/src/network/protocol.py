@@ -736,8 +736,25 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             # Send error through secure channel
             from crypto.secure_channel import get_secure_channel
             channel = get_secure_channel(peer_id)
+            if not channel:
+                # Try looking up by the original ID if it's a mapped ID issue
+                logger.error(f"No secure channel available for peer {peer_id}")
+                
+                # You may need to consult your connection mapping here to find the correct ID
+                from crypto.secure_channel import conn_to_peer_id
+                for conn_id, mapped_id in conn_to_peer_id.items():
+                    if mapped_id == peer_id:
+                        # Found a mapping, try using the original ID
+                        channel = get_secure_channel(mapped_id)
+                        if channel:
+                            logger.info(f"Found channel using mapped ID {mapped_id}")
+                            break
+            
             if channel:
-                channel.send_encrypted("ERROR", f"REQUEST_DENIED:{filename}")
+                # Send the file through secure channel
+                send_file_secure(channel, file_path, file_hash)
+            else:
+                logger.error(f"Could not find secure channel for peer {peer_id}")
         else:
             conn.sendall(b"ERR:REQUEST_DENIED")
         return
