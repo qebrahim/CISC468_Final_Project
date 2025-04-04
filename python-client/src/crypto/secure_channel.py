@@ -537,6 +537,7 @@ def get_secure_channel(peer_id):
     """Get an existing secure channel for a peer"""
     return secure_channels.get(peer_id)
 
+
 def handle_secure_message(conn, addr, message):
     """Handle secure protocol messages"""
     try:
@@ -566,6 +567,12 @@ def handle_secure_message(conn, addr, message):
                 exchange_data = json.loads(payload)
                 extracted_peer_id = exchange_data.get("peer_id")
                 logger.info(f"Extracted peer ID from payload: {extracted_peer_id}")
+                
+                # Store connection-to-peer mapping
+                if extracted_peer_id:
+                    conn_id = id(conn)
+                    conn_to_peer_id[conn_id] = extracted_peer_id
+                    logger.info(f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
         except Exception as e:
             logger.error(f"Error extracting peer ID from payload: {e}")
 
@@ -582,16 +589,24 @@ def handle_secure_message(conn, addr, message):
                 contact = {"peer_id": extracted_peer_id}
             else:
                 return {"status": "not_authenticated"}
-        if extracted_peer_id:
-            conn_id = id(conn)
-            conn_to_peer_id[conn_id] = extracted_peer_id
-            logger.info(f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
         
         # Prioritize the extracted peer ID
         peer_id = extracted_peer_id or contact["peer_id"]
         logger.info(f"Using peer ID: {peer_id}")
-        if not hasattr(handle_secure_message, 'conn_to_peer_id'):
-            handle_secure_message.conn_to_peer_id = {}
+
+        # For DATA command, lookup using connection ID mapping
+        if secure_command == "DATA":
+            conn_id = id(conn)
+            mapped_peer_id = conn_to_peer_id.get(conn_id)
+            
+            if mapped_peer_id:
+                logger.info(f"Using mapped peer ID for DATA: {mapped_peer_id}")
+                peer_id = mapped_peer_id
+            else:
+                logger.info(f"No mapping found for connection ID {conn_id}, using default peer ID: {peer_id}")
+                
+                # Try to create mapping if it doesn't exist
+                conn_to_peer_id[conn_id] = peer_id
 
         # The rest of the function remains the same as in the original implementation
         if secure_command == "EXCHANGE":

@@ -726,7 +726,37 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
         print(f"\nAllow {display_peer_id} at {requester} to download {filename}? (y/n): ",
               end="", flush=True)
 
-    consent = input().lower().strip()
+    # Check if file is already in shared files list
+    is_already_shared = False
+    basename = os.path.basename(filename)
+
+    # Check in explicitly shared files
+    for path in shared_files:
+        if os.path.basename(path) == basename:
+            is_already_shared = True
+            break
+
+    # Also check in default shared directory
+    if not is_already_shared:
+        shared_dir = Path.home() / '.p2p-share' / 'shared'
+        if (shared_dir / basename).exists():
+            is_already_shared = True
+
+    # Skip asking for consent if the file is already shared
+    if is_already_shared:
+        print(
+            f"\nAuto-sharing file '{filename}' with {display_peer_id} (file is already in shared list)")
+        consent = 'y'
+    else:
+        # Ask for user consent for files not in the shared list
+        if secure:
+            print(f"\nSecure file request from {display_peer_id} for {filename}. Allow? (y/n): ",
+                  end="", flush=True)
+        else:
+            print(f"\nAllow {display_peer_id} at {requester} to download {filename}? (y/n): ",
+                  end="", flush=True)
+
+        consent = input().lower().strip()
 
     if consent != 'y':
         logger.info(
@@ -736,25 +766,8 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
             # Send error through secure channel
             from crypto.secure_channel import get_secure_channel
             channel = get_secure_channel(peer_id)
-            if not channel:
-                # Try looking up by the original ID if it's a mapped ID issue
-                logger.error(f"No secure channel available for peer {peer_id}")
-                
-                # You may need to consult your connection mapping here to find the correct ID
-                from crypto.secure_channel import conn_to_peer_id
-                for conn_id, mapped_id in conn_to_peer_id.items():
-                    if mapped_id == peer_id:
-                        # Found a mapping, try using the original ID
-                        channel = get_secure_channel(mapped_id)
-                        if channel:
-                            logger.info(f"Found channel using mapped ID {mapped_id}")
-                            break
-            
             if channel:
-                # Send the file through secure channel
-                send_file_secure(channel, file_path, file_hash)
-            else:
-                logger.error(f"Could not find secure channel for peer {peer_id}")
+                channel.send_encrypted("ERROR", f"REQUEST_DENIED:{filename}")
         else:
             conn.sendall(b"ERR:REQUEST_DENIED")
         return
@@ -783,7 +796,28 @@ def handle_file_request(conn, addr, filename, secure=False, peer_id=None):
         # Check if we're using a secure channel
         if secure:
             # Send the file through the secure channel
-            send_file_secure(peer_id, file_path, file_hash)
+            from crypto.secure_channel import get_secure_channel
+            channel = get_secure_channel(peer_id)
+
+            if channel:
+                send_file_secure(peer_id, file_path, file_hash)
+            else:
+                logger.error(f"No secure channel found for peer {peer_id}")
+                # Try to find an alternative channel
+                from crypto.secure_channel import secure_channels
+                logger.info(
+                    f"Available channels: {list(secure_channels.keys())}")
+
+                # Check if there might be a channel with a different ID for the same peer
+                for channel_id, sc in secure_channels.items():
+                    if sc.socket == conn:
+                        logger.info(
+                            f"Found channel with ID {channel_id} matching the connection")
+                        send_file_secure(channel_id, file_path, file_hash)
+                        return
+
+                logger.error(
+                    f"Could not find any secure channel for this connection")
         else:
             # Send the file through regular connection
             send_file_regular(conn, file_path, file_hash)
