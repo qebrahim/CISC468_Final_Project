@@ -9,8 +9,9 @@ import time
 import json
 from network.offline_retrieval import handle_offline_file_request, request_file_from_alternative
 from crypto.key_migration import handle_key_migration
-
-
+import base64
+logging.basicConfig(level=logging.DEBUG, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Keep track of all active connections and shared files
@@ -21,6 +22,27 @@ hash_manager = None
 contact_manager = None
 authentication = None
 
+def debug_message_logger(function_name, message_type, payload, peer_id=None):
+    """Helper function to log detailed message information"""
+    logger.debug(f"DEBUG [{function_name}] =============================================")
+    logger.debug(f"DEBUG [{function_name}] Message Type: {message_type}")
+    logger.debug(f"DEBUG [{function_name}] Peer ID: {peer_id}")
+    
+    # Log payload differently based on type and length
+    if isinstance(payload, bytes):
+        logger.debug(f"DEBUG [{function_name}] Payload is bytes, length: {len(payload)}")
+        if len(payload) < 100:
+            logger.debug(f"DEBUG [{function_name}] Payload (hex): {payload.hex()}")
+        else:
+            logger.debug(f"DEBUG [{function_name}] Payload start (hex): {payload[:50].hex()}")
+    else:
+        payload_len = len(payload) if payload else 0
+        logger.debug(f"DEBUG [{function_name}] Payload length: {payload_len}")
+        if payload_len < 100:
+            logger.debug(f"DEBUG [{function_name}] Payload: {payload}")
+        else:
+            logger.debug(f"DEBUG [{function_name}] Payload start: {payload[:50]}...")
+    logger.debug(f"DEBUG [{function_name}] =============================================")
 
 def start_server(host='0.0.0.0', port=12345, connection_callback=None, peer_id=None):
     """Start the server with an optional connection callback and peer ID for hash manager"""
@@ -275,6 +297,42 @@ def handle_secure_protocol(message, peer_id, conn):
         message_type = parts[0]
         payload = parts[1] if len(parts) > 1 else ""
 
+        # Log detailed message information
+        debug_message_logger("handle_secure_protocol", message_type, payload, peer_id)
+
+        # Enhanced debugging for file transfer
+        if message_type in ["FILE_HEADER", "FILE_CHUNK", "FILE_END"]:
+            logger.debug(f"Secure file transfer message: {message_type} from {peer_id}")
+            
+            if message_type == "FILE_HEADER":
+                try:
+                    header = json.loads(payload)
+                    logger.debug(f"FILE_HEADER content: {header}")
+                    if "key" in header:
+                        key_b64 = header["key"]
+                        key_bytes = base64.b64decode(key_b64)
+                        logger.debug(f"Encryption key in header (hex): {key_bytes.hex()[:16]}...")
+                except Exception as e:
+                    logger.error(f"Error parsing FILE_HEADER: {e}")
+            
+            if message_type == "FILE_CHUNK":
+                try:
+                    # Check if we have an active transfer for this peer
+                    if hasattr(handle_secure_file_receive, 'secure_file_transfers'):
+                        if peer_id in handle_secure_file_receive.secure_file_transfers:
+                            transfer = handle_secure_file_receive.secure_file_transfers[peer_id]
+                            logger.debug(f"Active transfer found: {transfer['filename']}")
+                            logger.debug(f"Transfer progress: {transfer['received']}/{transfer['size']} bytes")
+                        else:
+                            logger.error(f"No active transfer found for peer {peer_id}")
+                    else:
+                        logger.error("secure_file_transfers not initialized")
+                except Exception as e:
+                    logger.error(f"Error checking file transfer status: {e}")
+                    
+            if message_type == "FILE_END":
+                logger.debug(f"FILE_END received for peer {peer_id}, payload: {payload}")
+
         # Handle different message types
         if message_type == "REQUEST_FILE":
             # Handle secure file request
@@ -283,9 +341,19 @@ def handle_secure_protocol(message, peer_id, conn):
                                 secure=True, peer_id=peer_id)
             return True
 
-        elif message_type == "FILE_HEADER" or message_type == "FILE_CHUNK" or message_type == "FILE_END":
-            # Handle secure file transfer
-            return handle_secure_file_receive(peer_id, message_type, payload)
+        elif message_type in ["FILE_HEADER", "FILE_CHUNK", "FILE_END"]:
+            # Enhanced call to handle_secure_file_receive with better error reporting
+            success = handle_secure_file_receive(peer_id, message_type, payload)
+            if not success:
+                logger.error(f"Failed to process {message_type} message from {peer_id}")
+                # Send error back to the peer
+                from crypto.secure_channel import get_secure_channel
+                channel = get_secure_channel(peer_id)
+                if channel:
+                    channel.send_encrypted("ERROR", f"FILE_PROCESSING_FAILED:{message_type}")
+            else:
+                logger.debug(f"Successfully processed {message_type} message from {peer_id}")
+            return success
 
         elif message_type == "FILE_LIST":
             # Handle file list response
@@ -304,7 +372,10 @@ def handle_secure_protocol(message, peer_id, conn):
 
     except Exception as e:
         logger.error(f"Error handling secure protocol message: {e}")
+        import traceback
+        traceback.print_exc()
         return False
+
 
 
 def display_file_list(peer_id_or_addr, file_list):
@@ -1306,3 +1377,41 @@ def request_file(host, port, filename, use_secure=False):
         logger.error(f"Error requesting file: {e}")
         print(f"Error requesting file: {e}")
         return False
+def inspect_secure_channel(peer_id):
+    """Debug function to inspect the state of a secure channel"""
+    from crypto.secure_channel import get_secure_channel
+    
+    channel = get_secure_channel(peer_id)
+    if not channel:
+        logger.error(f"No secure channel found for peer {peer_id}")
+        return
+    
+    logger.debug("================= SECURE CHANNEL INSPECTION =================")
+    logger.debug(f"Peer ID: {channel.peer_id}")
+    logger.debug(f"Session ID: {channel.session_id}")
+    logger.debug(f"Is Initiator: {channel.is_initiator}")
+    logger.debug(f"Established: {channel.established}")
+    logger.debug(f"Send Counter: {channel.send_counter}")
+    logger.debug(f"Receive Counter: {channel.receive_counter}")
+    
+    # Check keys
+    if channel.encryption_key:
+        logger.debug(f"Encryption Key (hex): {channel.encryption_key.hex()[:16]}...")
+    else:
+        logger.debug("Encryption Key: None")
+        
+    if channel.decryption_key:
+        logger.debug(f"Decryption Key (hex): {channel.decryption_key.hex()[:16]}...")
+    else:
+        logger.debug("Decryption Key: None")
+    
+    # Socket state
+    if channel.socket:
+        logger.debug(f"Socket: {channel.socket}")
+        logger.debug(f"Socket Family: {channel.socket.family}")
+        logger.debug(f"Socket Type: {channel.socket.type}")
+        logger.debug(f"Socket Fileno: {channel.socket.fileno()}")
+    else:
+        logger.debug("Socket: None")
+    
+    logger.debug("===========================================================")

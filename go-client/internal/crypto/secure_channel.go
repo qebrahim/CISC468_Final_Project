@@ -55,6 +55,9 @@ var (
 var secureFileTransfers = make(map[string]*SecureFileTransfer)
 var fileTransferMutex sync.Mutex
 
+var addrToPeerID = make(map[string]string)
+var addrToPeerIDMutex sync.RWMutex
+
 // In NewSecureChannel function in secure_channel.go
 // NewSecureChannel creates a new secure channel
 func NewSecureChannel(peerID string, conn net.Conn, isInitiator bool) (*SecureChannel, error) {
@@ -534,6 +537,8 @@ func (sc *SecureChannel) HandleEncryptedData(encryptedData string) (map[string]s
 	messageType := parts[0]
 	payload := parts[1]
 
+	fmt.Printf("Handling encrypted message: Type=%s, Payload=%s\n", messageType, payload)
+
 	result := map[string]string{
 		"type":    messageType,
 		"payload": payload,
@@ -564,31 +569,11 @@ func GetSecureChannel(peerID string) *SecureChannel {
 	return secureChannels[peerID]
 }
 
-// HandleSecureMessage processes secure protocol messages
+// Then modify the HandleSecureMessage function to properly store and look up peer IDs by address:
+
 func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string]interface{}, error) {
 	// Debug the inputs to see what's coming in
 	fmt.Printf("DEBUG: HandleSecureMessage called with addr='%s', message='%s'\n", addr, message)
-
-	// If addr is actually the message content, extract the real address from the connection
-	if strings.HasPrefix(addr, "SECURE:") {
-		// We've been passed the message in the addr parameter
-		fmt.Printf("DEBUG: Detected incorrect parameter order\n")
-
-		// Get the real address from the connection
-		realAddr := ""
-		if conn != nil && conn.RemoteAddr() != nil {
-			realAddr = conn.RemoteAddr().String()
-		}
-
-		// Swap parameters
-		temp := addr
-		addr = realAddr
-		if !strings.HasPrefix(message, "SECURE:") {
-			message = temp // Only swap if message doesn't already look like a message
-		}
-
-		fmt.Printf("DEBUG: After correction: addr='%s', message='%s'\n", addr, message)
-	}
 
 	parts := strings.SplitN(message, ":", 3)
 	if len(parts) < 3 {
@@ -600,34 +585,29 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 	secureCommand := parts[1]
 	payload := parts[2]
 
-	// Important: Extract host and port from addr properly
+	// Extract host and port from addr properly
 	var host, port string
+	fmt.Printf("DEBUG: port before processing: %s\n", port)
 	if addr != "" && strings.Contains(addr, ":") {
-		// For IPv4 addresses
 		hostPort := strings.Split(addr, ":")
 		if len(hostPort) >= 2 {
 			host = hostPort[0]
-			port = hostPort[1]
+			//port = hostPort[1]
 		} else {
-			// Handle invalid format
 			return nil, fmt.Errorf("invalid address format: %s", addr)
 		}
 	} else {
-		// In case addr is passed in a non-standard format or empty
 		if conn != nil && conn.RemoteAddr() != nil {
-			// Try to get the address from the connection
 			remoteAddr := conn.RemoteAddr().String()
 			hostPort := strings.Split(remoteAddr, ":")
 			if len(hostPort) >= 2 {
 				host = hostPort[0]
-				port = hostPort[1]
+				//port = hostPort[1]
 			} else {
-				// Still invalid, use a default
 				host = addr
 				port = "12345" // Default port
 			}
 		} else {
-			// Use what we have as a fallback
 			host = addr
 			port = "12345" // Default port
 		}
@@ -636,11 +616,51 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 	// Use the standard port format for address lookups
 	standardAddr := fmt.Sprintf("%s:12345", host)
 
-	// After extracting host and port
-	fmt.Printf("DEBUG: Extracted host: %s, port: %s\n", host, port)
-	fmt.Printf("DEBUG: Using standard address: %s\n", standardAddr)
+	// Look up the peer using the address
+	contactManager, err := GetContactManager()
+	if err != nil {
+		fmt.Printf("DEBUG: Error getting contact manager: %v\n", err)
+	} else {
+		fmt.Printf("Looking for contact with address: %s\n", standardAddr)
+		fmt.Printf("Current contacts: %+v\n", contactManager.Contacts)
 
-	// Rest of your function...
+		// Get peer ID from contact manager by address
+		contact, found := contactManager.GetContactByAddress(standardAddr)
+		if found {
+			// Store mapping between address and peer ID
+			addrToPeerIDMutex.Lock()
+			addrToPeerID[addr] = contact.PeerID
+			addrToPeerIDMutex.Unlock()
+
+			fmt.Printf("DEBUG: Mapped address %s to peer ID %s\n", addr, contact.PeerID)
+		}
+	}
+
+	// Try to get peer ID from address mapping
+	var peerID string
+	addrToPeerIDMutex.RLock()
+	mappedPeerID, exists := addrToPeerID[addr]
+	addrToPeerIDMutex.RUnlock()
+
+	if exists {
+		peerID = mappedPeerID
+		fmt.Printf("DEBUG: Using mapped peer ID %s for address %s\n", peerID, addr)
+	} else if secureCommand == "EXCHANGE" || secureCommand == "EXCHANGE_RESPONSE" {
+		// For exchange messages, extract peer ID from payload
+		var exchangeData map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &exchangeData); err == nil {
+			if extractedPeerID, ok := exchangeData["peer_id"].(string); ok {
+				peerID = extractedPeerID
+				// Store the mapping
+				addrToPeerIDMutex.Lock()
+				addrToPeerID[addr] = peerID
+				addrToPeerIDMutex.Unlock()
+				fmt.Printf("DEBUG: Extracted and mapped peer ID %s from payload for address %s\n", peerID, addr)
+			}
+		}
+	}
+
+	// Now handle the message based on command
 	switch secureCommand {
 	case "EXCHANGE":
 		// Handle key exchange request
@@ -655,23 +675,11 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 			return nil, fmt.Errorf("missing peer_id in exchange data")
 		}
 
-		// Check if peer is authenticated
-		contactManager, err := GetContactManager()
-		if err != nil {
-			return nil, fmt.Errorf("error getting contact manager: %v", err)
-		}
-
-		// For security, only allow authenticated peers to establish secure channels
-		hostPort := strings.Split(addr, ":")
-		if len(hostPort) != 2 {
-			return nil, fmt.Errorf("invalid address format: %s", addr)
-		}
-		standardAddr = fmt.Sprintf("%s:12345", hostPort[0])
-
-		_, isTrusted := contactManager.GetContactByAddress(standardAddr)
-		if !isTrusted {
-			return nil, fmt.Errorf("peer not authenticated: %s", peerID)
-		}
+		// Store mapping between address and peer ID
+		addrToPeerIDMutex.Lock()
+		addrToPeerID[addr] = peerID
+		addrToPeerIDMutex.Unlock()
+		fmt.Printf("Mapped connection pointer %v to peer ID %s\n", addr, peerID)
 
 		// Create a new secure channel as responder
 		channel, err := NewSecureChannel(peerID, conn, false)
@@ -703,6 +711,11 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 			return nil, fmt.Errorf("missing peer_id in exchange response")
 		}
 
+		// Store mapping between address and peer ID
+		addrToPeerIDMutex.Lock()
+		addrToPeerID[addr] = peerID
+		addrToPeerIDMutex.Unlock()
+
 		// Find the channel
 		channel := GetSecureChannel(peerID)
 		if channel == nil {
@@ -722,28 +735,55 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 
 	case "DATA":
 		// Handle encrypted data
-		// Find the channel based on the socket address
-		hostPort := strings.Split(addr, ":")
-		if len(hostPort) != 2 {
-			return nil, fmt.Errorf("invalid address format: %s", addr)
-		}
-		standardAddr := fmt.Sprintf("%s:12345", hostPort[0])
+		// Use either the peerID we found earlier or try to get it from the stored mappings
+		channelPeerID := peerID
 
-		contactManager, err := GetContactManager()
-		if err != nil {
-			return nil, fmt.Errorf("error getting contact manager: %v", err)
+		if channelPeerID == "" {
+			// Look up in all the places we might have stored the mapping
+			addrToPeerIDMutex.RLock()
+			if mappedID, exists := addrToPeerID[addr]; exists {
+				channelPeerID = mappedID
+				fmt.Printf("DEBUG: Found peer ID %s from address mapping for %s\n", channelPeerID, addr)
+			}
+			addrToPeerIDMutex.RUnlock()
+
+			if channelPeerID == "" && conn != nil {
+				connID := fmt.Sprintf("%p", conn)
+				fmt.Printf("DEBUG: Looking for peer ID by connection %s\n", connID)
+				secureChannelMutex.RLock()
+				for id, ch := range secureChannels {
+					if ch.Conn == conn {
+						channelPeerID = id
+						fmt.Printf("DEBUG: Found peer ID %s by matching connection\n", channelPeerID)
+						break
+					}
+				}
+				secureChannelMutex.RUnlock()
+			}
+
+			if channelPeerID == "" {
+				return nil, fmt.Errorf("no secure channel established for peer address %s", addr)
+			}
 		}
 
-		contact, found := contactManager.GetContactByAddress(standardAddr)
-		if !found {
-			return nil, fmt.Errorf("no authenticated contact for %s", standardAddr)
-		}
-
-		peerID := contact.PeerID
-		channel := GetSecureChannel(peerID)
+		channel := GetSecureChannel(channelPeerID)
 
 		if channel == nil {
-			return nil, fmt.Errorf("no secure channel established for peer %s", peerID)
+			// Try looking up by connection
+			secureChannelMutex.RLock()
+			for id, ch := range secureChannels {
+				if ch.Conn == conn {
+					channel = ch
+					channelPeerID = id
+					fmt.Printf("DEBUG: Found channel for peer %s by matching connection\n", channelPeerID)
+					break
+				}
+			}
+			secureChannelMutex.RUnlock()
+
+			if channel == nil {
+				return nil, fmt.Errorf("no secure channel established for peer %s", channelPeerID)
+			}
 		}
 
 		// Decrypt and handle the data
@@ -751,27 +791,10 @@ func HandleSecureMessage(conn net.Conn, addr string, message string) (map[string
 		if err != nil {
 			return nil, fmt.Errorf("error handling encrypted data: %v", err)
 		}
-		messageType := result["type"]
-		messagePayload := result["payload"]
-
-		switch messageType {
-		case "FILE_HEADER":
-			// Process file header
-			handleSecureFileHeader(peerID, messagePayload)
-		case "FILE_CHUNK":
-			// Process file chunk
-			handleSecureFileChunk(peerID, messagePayload)
-		case "FILE_END":
-			// Process file end
-			handleSecureFileEnd(peerID, messagePayload)
-		case "FILE_LIST":
-			// Process file list
-			handleSecureFileList(peerID, messagePayload)
-		}
 
 		return map[string]interface{}{
 			"status":  "message_received",
-			"peer_id": peerID,
+			"peer_id": channelPeerID,
 			"type":    result["type"],
 			"payload": result["payload"],
 		}, nil
