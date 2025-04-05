@@ -104,23 +104,27 @@ func (pa *PeerAuthentication) GetPublicKeyPEM() string {
 }
 
 // CreateChallenge creates a new authentication challenge for a peer
+// In internal/crypto/authentication.go, modify the CreateChallenge method:
+
 func (pa *PeerAuthentication) CreateChallenge(peerID string) (string, string, error) {
+	// Generate more unique challenge ID
+	challengeIDBytes := make([]byte, 16) // Increase from 8 to 16
+	_, err := rand.Read(challengeIDBytes)
+	if err != nil {
+		return "", "", fmt.Errorf("error generating challenge ID: %v", err)
+	}
+	// Use timestamped ID to reduce collision chance
+	timestampPrefix := fmt.Sprintf("%d_", time.Now().UnixNano())
+	challengeIDStr := timestampPrefix + fmt.Sprintf("%x", challengeIDBytes)
+
 	// Generate random 32-byte challenge
 	challenge := make([]byte, 32)
-	_, err := rand.Read(challenge)
+	_, err = rand.Read(challenge)
 	if err != nil {
 		return "", "", fmt.Errorf("error generating challenge: %v", err)
 	}
 
-	// Generate unique challenge ID
-	challengeID := make([]byte, 8)
-	_, err = rand.Read(challengeID)
-	if err != nil {
-		return "", "", fmt.Errorf("error generating challenge ID: %v", err)
-	}
-	challengeIDStr := fmt.Sprintf("%x", challengeID)
-
-	// Store challenge for later verification
+	// Store challenge for later verification with more data
 	pa.PendingChallenges[challengeIDStr] = PendingChallenge{
 		PeerID:    peerID,
 		Challenge: challenge,

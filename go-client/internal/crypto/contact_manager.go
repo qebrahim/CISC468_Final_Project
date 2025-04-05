@@ -69,6 +69,7 @@ func (cm *ContactManager) LoadContacts() error {
 		return cm.SaveContacts()
 	}
 
+	cm.CleanupContactsByAddress()
 	// Read contacts file
 	data, err := os.ReadFile(cm.ContactsFile)
 	if err != nil {
@@ -292,4 +293,45 @@ func directlySaveContact(peerID, address, publicKey string) error {
 
 	fmt.Printf("Directly saved contact %s to file\n", peerID)
 	return nil
+}
+
+// Add this function to internal/crypto/contact_manager.go
+
+// CleanupContactsByAddress removes duplicate contacts that share the same address
+func (cm *ContactManager) CleanupContactsByAddress() {
+	// Create a map to track addresses
+	addressMap := make(map[string]string) // address -> first peerID
+	duplicates := make([]string, 0)
+
+	// First pass: identify duplicates
+	for peerID, contact := range cm.Contacts {
+		existingPeerID, exists := addressMap[contact.Address]
+		if exists {
+			// This is a duplicate address, if it's a newer contact keep it
+			existingContact := cm.Contacts[existingPeerID]
+			if contact.VerifiedAt > existingContact.VerifiedAt {
+				// This is newer, mark the older one as duplicate
+				duplicates = append(duplicates, existingPeerID)
+				addressMap[contact.Address] = peerID
+			} else {
+				// The existing one is newer, mark this one as duplicate
+				duplicates = append(duplicates, peerID)
+			}
+		} else {
+			// First time seeing this address
+			addressMap[contact.Address] = peerID
+		}
+	}
+
+	// Second pass: remove duplicates
+	for _, peerID := range duplicates {
+		delete(cm.Contacts, peerID)
+		fmt.Printf("Removed duplicate contact: %s\n", peerID)
+	}
+
+	// Save the cleaned contacts
+	if len(duplicates) > 0 {
+		cm.SaveContacts()
+		fmt.Printf("Cleaned up %d duplicate contacts\n", len(duplicates))
+	}
 }

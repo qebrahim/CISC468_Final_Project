@@ -47,14 +47,10 @@ This project implements a peer-to-peer secure file sharing application with two 
 
 ## Testing
 
-Both clients include unit tests to verify functionality. To run the tests for the Python client, navigate to the `python-client/tests` directory and run:
-```
-pytest
-```
+For python tests simply run the test file
 
-For the Go client, navigate to the `go-client/tests` directory and run:
-```
-go test
+For go tests run the application once regularly and connect to the python to establish keys then run the test suite using:
+go test ./tests
 ```
 
 ## Contributing

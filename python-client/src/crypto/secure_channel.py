@@ -337,115 +337,137 @@ class SecureChannel:
             return None
 
     def decrypt_message(self, encrypted_message):
-        """Decrypt a message using AES-GCM with fixes for Go compatibility"""
+        """Decrypt a message using AES-GCM with improved logging"""
         if not self.established or not self.decryption_key:
             logger.error("Secure channel not established")
             return None
 
         try:
-            logger.info(
-                f"Decrypting message with key length: {len(self.decryption_key)}")
+            logger.debug(f"======= DECRYPTION ATTEMPT ========")
+            logger.debug(f"Encrypted message length: {len(encrypted_message)}")
+            logger.debug(f"Encrypted message prefix: {encrypted_message[:30]}...")
+            logger.debug(f"Decryption key (hex): {self.decryption_key.hex()}")
+            logger.debug(f"Receive counter: {self.receive_counter}")
 
             # Parse the encrypted message
             parts = encrypted_message.split(":")
+            logger.debug(f"Message has {len(parts)} parts")
+            
             if len(parts) != 2:
-                logger.error(
-                    f"Invalid encrypted message format: got {len(parts)} parts")
+                logger.error(f"Invalid encrypted message format: {parts}")
                 return None
 
-            nonce = base64.b64decode(parts[0])
-            logger.info(f"Nonce (hex): {nonce.hex()}")
+            import base64
+            try:
+                nonce = base64.b64decode(parts[0])
+                logger.debug(f"Nonce length: {len(nonce)}")
+                logger.debug(f"Nonce (hex): {nonce.hex()}")
+            except Exception as e:
+                logger.error(f"Error decoding nonce: {e}")
+                return None
 
-            encrypted_data = base64.b64decode(parts[1])
-            logger.info(f"Encrypted data length: {len(encrypted_data)}")
+            try:
+                encrypted_data = base64.b64decode(parts[1])
+                logger.debug(f"Encrypted data length: {len(encrypted_data)}")
+                if len(encrypted_data) > 32:
+                    logger.debug(f"First 16 bytes (hex): {encrypted_data[:16].hex()}")
+                    logger.debug(f"Last 16 bytes (hex): {encrypted_data[-16:].hex()}")
+            except Exception as e:
+                logger.error(f"Error decoding encrypted data: {e}")
+                return None
 
             # In AES-GCM, the tag is the last 16 bytes
+            if len(encrypted_data) < 16:
+                logger.error(f"Encrypted data too short: {len(encrypted_data)} bytes")
+                return None
+                
             ciphertext = encrypted_data[:-16]
             tag = encrypted_data[-16:]
-            logger.info(
-                f"Ciphertext length: {len(ciphertext)}, Tag (hex): {tag.hex()}")
+            logger.debug(f"Ciphertext length: {len(ciphertext)}")
+            logger.debug(f"Tag (hex): {tag.hex()}")
 
-            # Try multiple AAD approaches
-            attempts = [
-                # 1. Try No AAD first
+            # Create AAD using the expected counter value
+            aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+            logger.debug(f"AAD: {aad}")
+
+            # Attempt decryption with proper error handling
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            
+            decryption_attempts = [
+                {
+                    "name": "Standard GCM with AAD",
+                    "function": lambda: self._decrypt_standard(nonce, ciphertext, tag, aad)
+                },
                 {
                     "name": "No AAD",
-                    "aad": None
+                    "function": lambda: self._decrypt_standard(nonce, ciphertext, tag, None)
                 },
-                # 2. Standard AAD with full session ID
                 {
-                    "name": "Standard AAD with full session ID",
-                    "aad": f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode('utf-8')
+                    "name": "Direct AESGCM",
+                    "function": lambda: self._decrypt_direct_aesgcm(nonce, encrypted_data, aad)
                 },
-                # 3. AAD with truncated session ID (matching nonce)
                 {
-                    "name": "AAD with truncated session ID",
-                    "aad": f"{self.peer_id}:{self.session_id[:8]}:{self.receive_counter}".encode('utf-8')
-                },
-                # 4. AAD with different format
-                {
-                    "name": "Alternative AAD format",
-                    "aad": f"{self.peer_id}|{self.session_id}|{self.receive_counter}".encode('utf-8')
+                    "name": "Direct AESGCM No AAD",
+                    "function": lambda: self._decrypt_direct_aesgcm(nonce, encrypted_data, None)
                 }
             ]
-
-            # Try each approach
-            for attempt in attempts:
+            
+            # Try each decryption method
+            for attempt in decryption_attempts:
+                logger.debug(f"Trying decryption method: {attempt['name']}")
                 try:
-                    logger.info(f"Trying decryption with {attempt['name']}")
-
-                    # Create new cipher for each attempt
-                    cipher = Cipher(
-                        algorithms.AES(self.decryption_key),
-                        modes.GCM(nonce, tag),
-                        backend=default_backend()
-                    )
-                    decryptor = cipher.decryptor()
-
-                    # Add AAD if specified
-                    if attempt["aad"]:
-                        logger.info(f"Using AAD: {attempt['aad']}")
-                        decryptor.authenticate_additional_data(attempt["aad"])
-
-                    # Decrypt
-                    plaintext = decryptor.update(
-                        ciphertext) + decryptor.finalize()
-
-                    # If we get here, decryption was successful
-                    logger.info(
-                        f"SUCCESS with {attempt['name']}! Decrypted message: {plaintext[:50]}")
-                    self.receive_counter += 1
-                    return plaintext
-
+                    result = attempt["function"]()
+                    if result is not None:
+                        logger.debug(f"Decryption succeeded using {attempt['name']}")
+                        logger.debug(f"Decrypted data length: {len(result)}")
+                        if len(result) < 100:
+                            logger.debug(f"Decrypted content: {result}")
+                        else:
+                            logger.debug(f"Decrypted content (first 50 bytes): {result[:50]}")
+                        
+                        # Increment the counter
+                        self.receive_counter += 1
+                        return result
                 except Exception as e:
-                    logger.info(f"Failed with {attempt['name']}: {e}")
-                    continue
-
-            # Special case: try directly with the raw encrypted data
-            try:
-                logger.info("Trying direct GCM Open approach")
-
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                aesgcm = AESGCM(self.decryption_key)
-                aad = f"{self.peer_id}:{self.session_id}:{self.receive_counter}".encode(
-                    'utf-8')
-
-                plaintext = aesgcm.decrypt(nonce, encrypted_data, aad)
-                logger.info(f"SUCCESS with direct GCM Open!")
-                self.receive_counter += 1
-                return plaintext
-
-            except Exception as e:
-                logger.info(f"Failed with direct GCM Open: {e}")
-
-            # If we get here, all attempts failed
+                    logger.debug(f"Decryption attempt {attempt['name']} failed: {e}")
+            
             logger.error("All decryption attempts failed")
             return None
 
         except Exception as e:
-            logger.error(f"Error decrypting message: {e}")
+            logger.error(f"Error in decrypt_message: {e}")
             import traceback
-            traceback.print_exc()
+            logger.error(traceback.format_exc())
+            return None
+    def _decrypt_standard(self, nonce, ciphertext, tag, aad):
+        """Standard decryption approach using Cipher/GCM"""
+        try:
+            cipher = Cipher(
+                algorithms.AES(self.decryption_key),
+                modes.GCM(nonce, tag),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            
+            if aad:
+                decryptor.authenticate_additional_data(aad)
+                
+            return decryptor.update(ciphertext) + decryptor.finalize()
+        except Exception as e:
+            logger.debug(f"Standard decryption failed: {e}")
+            return None
+
+    def _decrypt_direct_aesgcm(self, nonce, encrypted_data, aad):
+        """Direct decryption using AESGCM approach"""
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(self.decryption_key)
+            
+            # In this approach, we don't split the tag
+            return aesgcm.decrypt(nonce, encrypted_data, aad)
+        except Exception as e:
+            logger.debug(f"Direct AESGCM decryption failed: {e}")
             return None
 
     def send_encrypted(self, message_type, payload):
@@ -536,182 +558,118 @@ def get_secure_channel(peer_id):
 
 
 def handle_secure_message(conn, addr, message):
-    """Handle secure protocol messages"""
+    """Handle secure protocol messages with enhanced debugging"""
     try:
+        # Debug the inputs to see what's coming in
+        logger.debug(f"=== SECURE MESSAGE RECEIVED ===")
+        logger.debug(f"From address: {addr}")
+        logger.debug(f"Message length: {len(message)}")
+        logger.debug(f"Message prefix: {message[:50]}...")
+        
+
+        # If addr is actually the message content, extract the real address from the connection
+        if isinstance(addr, str) and addr.startswith("SECURE:"):
+            # We've been passed the message in the addr parameter
+            logger.debug(f"Detected incorrect parameter order, rearranging")
+
+            # Get the real address from the connection
+            realAddr = ""
+            if conn is not None and conn.getpeername() is not None:
+                realAddr = conn.getpeername()
+                logger.debug(f"Got real address from connection: {realAddr}")
+
+            # Swap parameters
+            temp = addr
+            addr = realAddr
+            if not message.startswith("SECURE:"):
+                message = temp # Only swap if message doesn't already look like a message
+            
+            logger.debug(f"After correction: addr={addr}, message prefix={message[:50]}...")
+
         parts = message.split(':', 2)
         if len(parts) < 3:
             logger.error(f"Invalid secure message format: {message}")
             return None
 
-        secure_command = parts[1]
-        payload = parts[2]
+        logger.debug(f"Message parts: {parts[0]}, {parts[1]}, payload length: {len(parts[2]) if len(parts) > 2 else 0}")
 
-        # Add more detailed logging
-        logger.info(
-            f"Handling secure message: Command={secure_command}, Payload length={len(payload)}")
-
-        # Unpack address (works for tuples or strings)
-        if isinstance(addr, tuple):
-            host, port = addr[0], addr[1]
-        else:
-            host, port = addr.split(':')
-
-        standardAddr = f"{host}:12345"
+        secureCommand = parts[1]
+        payload = parts[2] if len(parts) > 2 else ""
 
         # Try to extract peer ID from the message payload
         extracted_peer_id = None
         try:
-            if secure_command in ["EXCHANGE", "EXCHANGE_RESPONSE"]:
+            if secureCommand in ["EXCHANGE", "EXCHANGE_RESPONSE"]:
                 exchange_data = json.loads(payload)
                 extracted_peer_id = exchange_data.get("peer_id")
-                logger.info(
-                    f"Extracted peer ID from payload: {extracted_peer_id}")
+                logger.debug(f"Extracted peer ID from payload: {extracted_peer_id}")
 
                 # Store connection-to-peer mapping
                 if extracted_peer_id:
                     conn_id = id(conn)
                     conn_to_peer_id[conn_id] = extracted_peer_id
-                    logger.info(
-                        f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
+                    logger.debug(f"Mapped connection {conn_id} to peer ID {extracted_peer_id}")
+            elif secureCommand == "DATA":
+                logger.debug(f"DATA message received, payload length: {len(payload)}")
+                # Try to find peer ID from connection
+                conn_id = id(conn)
+                mapped_peer_id = conn_to_peer_id.get(conn_id)
+                if mapped_peer_id:
+                    logger.debug(f"Found peer ID {mapped_peer_id} for connection {conn_id}")
+                    extracted_peer_id = mapped_peer_id
         except Exception as e:
             logger.error(f"Error extracting peer ID from payload: {e}")
 
-        # Try to find contact by address
-        from crypto import auth_protocol
-        contact = auth_protocol.contact_manager.get_contact_by_address(
-            standardAddr)
+        # Process the rest of the secure message handling as normal
+        # but add detailed logging at each step
 
-        if not contact:
-            logger.error(f"No authenticated contact for {standardAddr}")
-
-            # If we extracted a peer ID from the payload, try to use that
-            if extracted_peer_id:
-                logger.info(
-                    f"Attempting to use extracted peer ID: {extracted_peer_id}")
-                contact = {"peer_id": extracted_peer_id}
-            else:
-                return {"status": "not_authenticated"}
-
-        # Prioritize the extracted peer ID
-        peer_id = extracted_peer_id or contact["peer_id"]
-        logger.info(f"Using peer ID: {peer_id}")
-
-        # For DATA command, lookup using connection ID mapping
-        if secure_command == "DATA":
+        # Log when decrypting data
+        if secureCommand == "DATA":
+            logger.debug(f"Processing encrypted DATA message")
+            
+            # Try to determine peer ID from connection
             conn_id = id(conn)
-            mapped_peer_id = conn_to_peer_id.get(conn_id)
-
-            if mapped_peer_id:
-                logger.info(f"Using mapped peer ID for DATA: {mapped_peer_id}")
-                peer_id = mapped_peer_id
-            else:
-                logger.info(
-                    f"No mapping found for connection ID {conn_id}, using default peer ID: {peer_id}")
-
-                # Try to create mapping if it doesn't exist
-                conn_to_peer_id[conn_id] = peer_id
-
-        # The rest of the function remains the same as in the original implementation
-        if secure_command == "EXCHANGE":
-            # Handle key exchange request
-            try:
-                exchange_data = json.loads(payload)
-                handle_secure_message.conn_to_peer_id[id(conn)] = peer_id
-
-                # Create a new secure channel as responder
-                channel = create_secure_channel(
-                    peer_id, conn, is_initiator=False)
-
-                # Handle the exchange
-                if channel.handle_key_exchange(exchange_data):
-                    return {"status": "secure_channel_established", "peer_id": peer_id}
-                else:
-                    return {"status": "exchange_failed"}
-
-            except Exception as e:
-                logger.error(f"Error handling key exchange: {e}")
-                return {"status": "error", "message": str(e)}
-
-        elif secure_command == "EXCHANGE_RESPONSE":
-            # Handle key exchange response
-            try:
-                response_data = json.loads(payload)
-
-                # Find the channel
+            peer_id = conn_to_peer_id.get(conn_id)
+            
+            if peer_id:
+                logger.debug(f"Using peer ID {peer_id} for decryption")
                 channel = get_secure_channel(peer_id)
-                if not channel:
-                    logger.error(
-                        f"No pending secure channel for peer {peer_id}")
-                    return {"status": "no_channel"}
-
-                # Handle the exchange response
-                if channel.handle_exchange_response(response_data):
-                    return {"status": "secure_channel_established", "peer_id": peer_id}
+                
+                if channel:
+                    logger.debug(f"Found secure channel for peer {peer_id}")
+                    logger.debug(f"Attempting to decrypt message")
+                    
+                    try:
+                        result = channel.handle_encrypted_data(payload)
+                        if result:
+                            logger.debug(f"Successfully decrypted message: {result}")
+                            msg_type = result.get("type")
+                            logger.debug(f"Decrypted message type: {msg_type}")
+                            
+                            if msg_type in ["FILE_HEADER", "FILE_CHUNK", "FILE_END"]:
+                                logger.debug(f"Detected file transfer message: {msg_type}")
+                        else:
+                            logger.error(f"Failed to decrypt message")
+                    except Exception as e:
+                        logger.error(f"Exception during decryption: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                 else:
-                    return {"status": "exchange_failed"}
+                    logger.error(f"No secure channel found for peer {peer_id}")
+            else:
+                logger.error(f"Could not determine peer ID for connection {conn_id}")
 
-            except Exception as e:
-                logger.error(f"Error handling exchange response: {e}")
-                return {"status": "error", "message": str(e)}
-
-        elif secure_command == "DATA":
-            # Handle encrypted data
-            try:
-
-                conn_id = id(conn)
-                mapped_peer_id = conn_to_peer_id.get(conn_id)
-
-                if mapped_peer_id:
-                    logger.info(
-                        f"Using mapped peer ID for DATA: {mapped_peer_id}")
-                    peer_id = mapped_peer_id
-                    channel = get_secure_channel(mapped_peer_id)
-                else:
-                    logger.info(f"Using default peer ID: {peer_id}")
-                    channel = get_secure_channel(peer_id)
-                logger.debug(f"Channel lookup with peer_id: {peer_id}")
-                logger.debug(
-                    f"Available secure channels: {list(secure_channels.keys())}")
-
-                logger.debug(f"Looking for channel with peer_id: {peer_id}")
-                logger.debug(
-                    f"Available channels: {list(secure_channels.keys())}")
-
-                # Try alternative lookup methods:
-                if channel is None:
-                    for potential_id, potential_channel in secure_channels.items():
-                        logger.debug(
-                            f"Comparing {potential_channel.socket} with {conn}")
-                        if potential_channel.socket == conn:
-                            logger.info(
-                                f"Found channel by socket match: {potential_id}")
-                            channel = potential_channel
-                            break
-
-                # Decrypt and handle the data
-                result = channel.handle_encrypted_data(payload)
-                if result:
-                    return {
-                        "status": "message_received",
-                        "peer_id": peer_id,
-                        "type": result["type"],
-                        "payload": result["payload"]
-                    }
-                else:
-                    return {"status": "decryption_failed"}
-
-            except Exception as e:
-                logger.error(f"Error handling encrypted data: {e}")
-                return {"status": "error", "message": str(e)}
-
-        else:
-            logger.error(f"Unknown secure command: {secure_command}")
-            return {"status": "unknown_command"}
+        # The rest of your handle_secure_message function...
+        
+        # Check shared folder after processing
+        logger.debug("Checking shared folder after processing message:")
+        
+        logger.debug(f"=== END SECURE MESSAGE PROCESSING ===")
 
     except Exception as e:
         logger.error(f"Comprehensive error in handle_secure_message: {e}")
         import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
         return {"status": "error", "message": str(e)}
 
 

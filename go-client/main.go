@@ -1322,6 +1322,19 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 		}
 
 		// Check if this is a secure channel message
+
+		// For sensitive operations, check if peer is authenticated
+		if command == "REQUEST_FILE" || command == "LIST_FILES" {
+			// Only check if auth system is active
+			if contactManager != nil && authentication != nil {
+				if !crypto.CheckPeerAuthenticated(standardAddr) {
+					fmt.Printf("Unauthenticated access attempt from %s\n", peerAddr)
+					conn.Write([]byte("ERR:AUTHENTICATION_REQUIRED"))
+					continue
+				}
+			}
+		}
+		// In the handlePeerConnection function, modify the section that handles secure messages
 		if command == "SECURE" {
 			// Process secure channel message
 			result, err := crypto.HandleSecureMessage(conn, peerAddr, message)
@@ -1344,12 +1357,63 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 						fmt.Printf("Invalid secure message format\n")
 						continue
 					}
+
+					fmt.Printf("DEBUG: Processing secure message: Type=%s, PeerID=%s, Payload=%s\n", messageType, peerID, payload)
+
 					if messageType == "REQUEST_FILE" {
 						// Handle file request
-						handleFileRequest(conn, peerAddr, payload)
+						fmt.Printf("DEBUG: Received secure file request for %s from peer %s\n", payload, peerID)
+
+						// Get secure channel for this peer
+						secureChannel := crypto.GetSecureChannel(peerID)
+						if secureChannel == nil {
+							fmt.Printf("ERROR: No secure channel found for peer %s despite receiving secure message\n", peerID)
+							continue
+						}
+
+						// Find the file
+						filename := payload
+						filePath := findSharedFile(filename)
+						if filePath == "" {
+							fmt.Printf("ERROR: File %s not found for secure transfer\n", filename)
+							secureChannel.SendEncrypted("ERROR", "FILE_NOT_FOUND")
+							continue
+						}
+
+						// Calculate hash if available
+						fileHash := ""
+						if hashManager != nil {
+							hashInfo, exists := hashManager.GetFileHash(filename)
+							if exists {
+								fileHash = hashInfo.Hash
+							} else {
+								// Calculate hash
+								var err error
+								fileHash, err = hashManager.AddFileHash(filename, filePath, "")
+								if err != nil {
+									fmt.Printf("WARNING: Failed to calculate hash for %s: %v\n", filename, err)
+								}
+							}
+						}
+
+						fmt.Printf("DEBUG: Sending file %s securely to peer %s (hash: %s)\n", filePath, peerID, fileHash)
+						// Use your secure file sending function
+						go sendFileSecure(secureChannel, filePath, fileHash)
 					} else if messageType == "LIST_FILES" {
-						// Handle file list request
-						handleListFilesRequest(conn)
+						// Handle file list request through secure channel
+						fmt.Printf("DEBUG: Received secure file list request from peer %s\n", peerID)
+
+						// Get secure channel
+						secureChannel := crypto.GetSecureChannel(peerID)
+						if secureChannel == nil {
+							fmt.Printf("ERROR: No secure channel found for peer %s despite receiving secure message\n", peerID)
+							continue
+						}
+
+						// Get file list
+						fileList := getFileListString()
+						fmt.Printf("DEBUG: Sending file list securely: %s\n", fileList)
+						secureChannel.SendEncrypted("FILE_LIST", fileList)
 					} else if messageType == "FILE_HEADER" || messageType == "FILE_CHUNK" || messageType == "FILE_END" {
 						// Handle file transfer messages
 						handleSecureFileTransfer(peerID, messageType, payload)
@@ -1359,25 +1423,10 @@ func handlePeerConnection(conn net.Conn, peerAddr string) {
 				} else if result["status"] == "secure_channel_established" {
 					// New code to handle the secure channel established case
 					fmt.Printf("Secure channel established with peer %s\n", result["peer_id"])
-
-					// After a channel is established, we might need to wait for the next secure message
-					// You could start a goroutine here to handle subsequent messages
 				} else {
 					fmt.Printf("Unhandled secure message status: %s\n", result["status"])
 				}
 				continue
-			}
-		}
-
-		// For sensitive operations, check if peer is authenticated
-		if command == "REQUEST_FILE" || command == "LIST_FILES" {
-			// Only check if auth system is active
-			if contactManager != nil && authentication != nil {
-				if !crypto.CheckPeerAuthenticated(standardAddr) {
-					fmt.Printf("Unauthenticated access attempt from %s\n", peerAddr)
-					conn.Write([]byte("ERR:AUTHENTICATION_REQUIRED"))
-					continue
-				}
 			}
 		}
 
@@ -1624,6 +1673,9 @@ func sendFileRegular(conn net.Conn, filePath, fileHash string) {
 	fmt.Printf("File %s sent successfully\n", filepath.Base(filePath))
 }
 
+// Add this to main.go in the sendFileSecure function to enhance logging
+// Find the sendFileSecure function (around line 3300-3400 in main.go)
+
 func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 	// Open the file
 	file, err := os.Open(filePath)
@@ -1650,6 +1702,11 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 		return
 	}
 
+	// Enhanced debug logging - log key and file info
+	fmt.Printf("DEBUG: Sending file '%s' securely (size: %d bytes)\n", filename, fileSize)
+	fmt.Printf("DEBUG: Transfer key length: %d bytes\n", len(transferKey))
+	fmt.Printf("DEBUG: Transfer key (hex): %x\n", transferKey)
+
 	// Send file header with hash info and encryption key
 	header := map[string]interface{}{
 		"filename": filename,
@@ -1666,6 +1723,7 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 		return
 	}
 
+	fmt.Printf("DEBUG: Sending FILE_HEADER: %s\n", string(headerJSON))
 	err = channel.SendEncrypted("FILE_HEADER", string(headerJSON))
 	if err != nil {
 		fmt.Printf("Error sending file header: %v\n", err)
@@ -1692,6 +1750,8 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 
 		// Encrypt this chunk
 		chunk := buffer[:bytesRead]
+		fmt.Printf("DEBUG: Encrypting chunk of size %d bytes\n", len(chunk))
+
 		encryptedChunk, err := crypto.Encrypt(chunk, transferKey)
 		if err != nil {
 			fmt.Printf("Error encrypting chunk: %v\n", err)
@@ -1701,6 +1761,7 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 
 		// Encode encrypted chunk as base64
 		chunkB64 := base64.StdEncoding.EncodeToString(encryptedChunk)
+		fmt.Printf("DEBUG: Sending encrypted chunk (base64 length: %d)\n", len(chunkB64))
 
 		// Send the encrypted chunk
 		err = channel.SendEncrypted("FILE_CHUNK", chunkB64)
@@ -1719,19 +1780,28 @@ func sendFileSecure(channel *crypto.SecureChannel, filePath, fileHash string) {
 	}
 
 	// Send end of file marker
+	fmt.Printf("DEBUG: Sending FILE_END marker for file %s\n", filename)
 	err = channel.SendEncrypted("FILE_END", filename)
 	if err != nil {
 		fmt.Printf("Error sending end of file marker: %v\n", err)
 		return
 	}
 
-	fmt.Printf("File %s sent securely\n", filename)
+	// Add small delay to ensure last packet is sent
+	time.Sleep(100 * time.Millisecond)
+
+	fmt.Printf("File %s sent securely (%d bytes in %d chunks)\n", filename, bytesSent, bytesSent/4096+1)
 }
 
-// This function would be part of the secure channel message handling in main.go
+// Enhanced version of handleSecureFileTransfer to fix potential issues
+// This function should be in main.go (around line 1500-1600)
+
 func handleSecureFileTransfer(peerID string, messageType string, payload string) {
 	// Access the global transfer state map
 	transfer, exists := secureFileTransfers[peerID]
+
+	fmt.Printf("DEBUG: Received secure file message: Type=%s, Peer=%s, Payload length=%d\n",
+		messageType, peerID, len(payload))
 
 	if messageType == "FILE_HEADER" {
 		// Process a file header which initiates a new transfer
@@ -1776,7 +1846,8 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 			if err != nil {
 				fmt.Printf("Error decoding transfer key: %v\n", err)
 			} else {
-				fmt.Printf("Received encryption key for file transfer (len: %d)\n", len(transferKey))
+				fmt.Printf("DEBUG: Received encryption key for file transfer (len: %d) -> %x\n",
+					len(transferKey), transferKey[:8])
 			}
 		}
 
@@ -1810,7 +1881,7 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 			StartTime:   time.Now(),
 		}
 
-		fmt.Printf("Starting secure file transfer: %s (%d bytes)\n", filename, fileSize)
+		fmt.Printf("DEBUG: Starting secure file transfer: %s (%d bytes)\n", filename, fileSize)
 
 	} else if messageType == "FILE_CHUNK" {
 		// Process a file chunk
@@ -1826,17 +1897,24 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 			return
 		}
 
+		fmt.Printf("DEBUG: Received encrypted chunk of size %d bytes\n", len(encryptedChunk))
+
 		var chunk []byte
 		// Decrypt the chunk if we have an encryption key
 		if transfer.TransferKey != nil {
 			chunk, err = crypto.Decrypt(encryptedChunk, transfer.TransferKey)
 			if err != nil {
-				fmt.Printf("Error decrypting file chunk: %v\n", err)
-				return
+				fmt.Printf("DEBUG: Error decrypting chunk: %v\n", err)
+				fmt.Printf("DEBUG: Encrypted chunk first bytes: %x\n", encryptedChunk[:16])
+				fmt.Printf("DEBUG: Key used for decryption: %x\n", transfer.TransferKey[:16])
+
+			} else {
+				fmt.Printf("DEBUG: Chunk decryption successful (size: %d bytes)\n", len(chunk))
 			}
 		} else {
 			// No encryption key, use raw data (for backward compatibility)
 			chunk = encryptedChunk
+			fmt.Printf("DEBUG: No encryption key, using raw chunk data\n")
 		}
 
 		// Write the chunk to file
@@ -1850,9 +1928,8 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 
 		// Display progress
 		percentComplete := float64(transfer.Received) / float64(transfer.Size) * 100
-		if transfer.Received%40960 == 0 || transfer.Received >= int(transfer.Size) {
-			fmt.Printf("Receiving (secure): %.1f%%\n", percentComplete)
-		}
+		fmt.Printf("Receiving (secure): %.1f%% (%d/%d bytes)\n",
+			percentComplete, transfer.Received, transfer.Size)
 
 	} else if messageType == "FILE_END" {
 		// Process end of file marker
@@ -1873,8 +1950,9 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 
 		// Verify the transfer is complete
 		if int64(transfer.Received) < transfer.Size {
-			fmt.Printf("Warning: Incomplete file transfer for %s (%d/%d bytes)\n",
-				transfer.Filename, transfer.Received, transfer.Size)
+			fmt.Printf("Warning: Incomplete file transfer for %s (%d/%d bytes, %.1f%%)\n",
+				transfer.Filename, transfer.Received, transfer.Size,
+				float64(transfer.Received)/float64(transfer.Size)*100)
 		} else {
 			fmt.Printf("File transfer complete: %s (%d bytes in %v)\n",
 				transfer.Filename, transfer.Size, duration)
@@ -1897,6 +1975,16 @@ func handleSecureFileTransfer(peerID string, messageType string, payload string)
 		absPath, _ := filepath.Abs(transfer.Path)
 		if !contains(sharedFiles, absPath) {
 			sharedFiles = append(sharedFiles, absPath)
+			fmt.Printf("Added %s to shared files list\n", absPath)
+		}
+
+		// Ensure the file is readable
+		fileInfo, err := os.Stat(transfer.Path)
+		if err != nil {
+			fmt.Printf("Error checking file: %v\n", err)
+		} else {
+			fmt.Printf("File saved as: %s (size: %d bytes, mode: %s)\n",
+				transfer.Path, fileInfo.Size(), fileInfo.Mode().String())
 		}
 
 		// Clean up
@@ -2593,4 +2681,65 @@ func handleKeyMigration(scanner *bufio.Scanner) {
 
 	fmt.Println("✅ Key migration completed successfully")
 	fmt.Println("You need to restart the application for the changes to take effect")
+}
+
+// Helper function to find a file in shared locations
+func findSharedFile(filename string) string {
+	// Check if file exists as an exact path
+	if _, err := os.Stat(filename); err == nil {
+		return filename
+	}
+
+	// Check if file exists in shared files by basename
+	basename := filepath.Base(filename)
+	for _, path := range sharedFiles {
+		if filepath.Base(path) == basename {
+			return path
+		}
+	}
+
+	// Check in default shared directory
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		sharedPath := filepath.Join(homeDir, ".p2p-share", "shared", basename)
+		if _, err := os.Stat(sharedPath); err == nil {
+			return sharedPath
+		}
+	}
+
+	return ""
+}
+
+// Helper function to get the file list as a string
+func getFileListString() string {
+	// Collect filenames from all shared files
+	var fileList []string
+
+	// Add explicitly shared files
+	for _, path := range sharedFiles {
+		fileList = append(fileList, filepath.Base(path))
+	}
+
+	// Check for files in the shared directory
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		sharedDir := filepath.Join(homeDir, ".p2p-share", "shared")
+		files, err := os.ReadDir(sharedDir)
+		if err == nil {
+			for _, file := range files {
+				if !file.IsDir() {
+					fileList = append(fileList, file.Name())
+				}
+			}
+		}
+	}
+
+	// Generate response string based on hash availability
+	if hashManager != nil {
+		// Get hash information for the files
+		return hashManager.GetFileHashesAsString(fileList)
+	} else {
+		// No hashes available, use comma-separated list
+		return strings.Join(fileList, ",")
+	}
 }
