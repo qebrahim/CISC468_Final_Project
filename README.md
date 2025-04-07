@@ -44,6 +44,8 @@ This project implements a peer-to-peer secure file sharing application with two 
 
 1. Navigate to the `go-client` directory. The go client should be run first.
 
+   cd go-client
+
    ```
 2. Run the Go client:
    ```
