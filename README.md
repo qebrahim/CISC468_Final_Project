@@ -19,7 +19,36 @@ This project implements a peer-to-peer secure file sharing application with two 
 - **Secure Storage**: Files are stored securely on the local device.
 - **Error Handling**: Displays appropriate messages for errors or security check failures.
 
+
+## Commands
+
+- **1. Shows connected peers
+- **2. Requests file from a specified peer
+- **3. Shares file to all connected peers
+- **4. Lists all shared files betweent he 2 peers
+- **5. Authenticates peer. This must be done before sharing/requesting any files.
+- **6. Shows authenticated peers
+- **7. Establishes a secure channel between peers. This is also done before secure file sharing
+- **8. Can add files to view and or send
+- **9. Key migration feature which changes keys and alerts connected peers
+- **10. Allows client to access any secure files
+- **11. Allows client to encrypt a local file so an attacker cannot steal the device and see it
+- **12. Terminates the client 
+
+
+
 ## Setup Instructions
+
+
+### Go Client
+
+1. Navigate to the `go-client` directory. The go client should be run first.
+
+   ```
+2. Run the Go client:
+   ```
+   go run main.go
+   ```
 
 ### Python Client
 
@@ -33,23 +62,12 @@ This project implements a peer-to-peer secure file sharing application with two 
    python src/main.py
    ```
 
-### Go Client
-
-1. Navigate to the `go-client` directory.
-2. Build the Go client:
-   ```
-   go build ./cmd
-   ```
-3. Run the Go client:
-   ```
-   ./cmd
-   ```
-
 ## Testing
 
 For python tests simply run the test file
 
 For go tests run the application once regularly and connect to the python to establish keys then run the test suite using:
+```
 go test ./tests
 ```
 
