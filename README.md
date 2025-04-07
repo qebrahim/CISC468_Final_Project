@@ -22,18 +22,18 @@ This project implements a peer-to-peer secure file sharing application with two 
 
 ## Commands
 
-- 1. Shows connected peers
-- 2. Requests file from a specified peer
-- 3. Shares file to all connected peers
-- 4. Lists all shared files betweent he 2 peers
-- 5. Authenticates peer. This must be done before sharing/requesting any files.
-- 6. Shows authenticated peers
-- 7. Establishes a secure channel between peers. This is also done before secure file sharing
-- 8. Can add files to view and or send
-- 9. Key migration feature which changes keys and alerts connected peers
-- 10. Allows client to access any secure files
-- 11. Allows client to encrypt a local file so an attacker cannot steal the device and see it
-- 12. Terminates the client 
+- 1: Shows connected peers
+- 2: Requests file from a specified peer
+- 3: Shares file to all connected peers
+- 4: Lists all shared files betweent he 2 peers
+- 5: Authenticates peer. This must be done before sharing/requesting any files.
+- 6: Shows authenticated peers
+- 7: Establishes a secure channel between peers. This is also done before secure file sharing
+- 8: Can add files to view and or send
+- 9: Key migration feature which changes keys and alerts connected peers
+- 10: Allows client to access any secure files
+- 11: Allows client to encrypt a local file so an attacker cannot steal the device and see it
+- 12: Terminates the client 
 
 
 
